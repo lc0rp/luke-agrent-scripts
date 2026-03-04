@@ -61,11 +61,15 @@ Restart gateway after enabling.
 4. Polls: `ntm --robot-tail=<project> --panes=2 --lines=<N> --json`
 5. Returns first valid assistant response block or timeout
 
+Supports multi-line messages; prompt matching tracks the full prompt block (not only the last line).
+
 ### `/nsa <message>`
 
 - Same send/poll flow as `/ns`
 - Immediate ack: `Message sent to <project>, waiting for result...`
 - Final response is posted asynchronously back to original channel target
+
+Supports multi-line messages with the same prompt-block matching as `/ns`.
 
 ## Async Reply Routing (`/nsa`)
 

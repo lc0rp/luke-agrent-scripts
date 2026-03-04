@@ -197,6 +197,13 @@ function lastMessageLine(message: string): string {
   return parts.at(-1) ?? "";
 }
 
+function normalizeMessageLines(message: string): string[] {
+  return normalizeOutput(message)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 function normalizeForCompare(value: string): string {
   return normalizeOutput(value).trim();
 }
@@ -213,17 +220,60 @@ function normalizePromptLine(line: string): string {
   return normalizeForCompare(line).replace(NO_OUTPUT_CHEVRON_RE, "").trim();
 }
 
-function messagePromptIndices(lines: string[], messageLastLine: string): number[] {
-  const normalizedMsg = normalizeForCompare(messageLastLine);
-  if (!normalizedMsg) return [];
+function lineMatchesMessageValue(candidate: string, expected: string): boolean {
+  if (!candidate || !expected) return false;
+  if (candidate === expected) return true;
+  if (candidate.includes(expected)) return true;
+  if (expected.length > 48 && expected.includes(candidate)) return true;
+  return false;
+}
+
+function isAssistantOutputLine(value: string): boolean {
+  return /^([•◦])\s*/.test(value);
+}
+
+function promptMatchesMessageAt(lines: string[], startIndex: number, message: string): boolean {
+  const messageLines = normalizeMessageLines(message);
+  if (messageLines.length === 0) return false;
+
+  const firstPromptLine = normalizePromptLine(lines[startIndex] ?? "");
+  if (!lineMatchesMessageValue(firstPromptLine, messageLines[0]!)) {
+    return false;
+  }
+
+  if (messageLines.length === 1) return true;
+
+  let messageIndex = 1;
+  for (let i = startIndex + 1; i < lines.length && messageIndex < messageLines.length; i += 1) {
+    const rawLine = lines[i] ?? "";
+    const value = normalizeForCompare(rawLine);
+
+    if (!value) continue;
+    if (NO_OUTPUT_CHEVRON_RE.test(normalizeOutput(rawLine))) return false;
+    if (NO_OUTPUT_CONTEXT_HINT_RE.test(value)) continue;
+    if (NO_OUTPUT_RULE_RE.test(value)) continue;
+    if (NO_OUTPUT_ACTIVITY_RE.test(value)) continue;
+    if (NO_OUTPUT_PROMPT_RE.test(value)) continue;
+    if (isAssistantOutputLine(value)) return false;
+
+    if (!lineMatchesMessageValue(value, messageLines[messageIndex]!)) {
+      return false;
+    }
+    messageIndex += 1;
+  }
+
+  return messageIndex === messageLines.length;
+}
+
+function messagePromptIndices(lines: string[], message: string): number[] {
+  const messageLines = normalizeMessageLines(message);
+  if (messageLines.length === 0) return [];
 
   const indices: number[] = [];
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
     if (!NO_OUTPUT_CHEVRON_RE.test(normalizeOutput(line))) continue;
-    const promptText = normalizePromptLine(line);
-    if (!promptText) continue;
-    if (promptText === normalizedMsg || promptText.includes(normalizedMsg)) {
+    if (promptMatchesMessageAt(lines, i, message)) {
       indices.push(i);
     }
   }
@@ -240,11 +290,15 @@ function responseLinesForPrompt(lines: string[], promptIndex: number, messageLas
   return filterNoOutputLines(block, messageLastLine);
 }
 
-function extractLatestMessageResponse(lines: string[], messageLastLine: string): {
+function extractLatestMessageResponse(
+  lines: string[],
+  message: string,
+  messageLastLine: string,
+): {
   promptCount: number;
   responseLines: string[];
 } {
-  const indices = messagePromptIndices(lines, messageLastLine);
+  const indices = messagePromptIndices(lines, message);
   if (indices.length === 0) {
     return { promptCount: 0, responseLines: [] };
   }
@@ -268,7 +322,7 @@ function filterNoOutputLines(lines: string[], messageLastLine: string): string[]
     if (NO_OUTPUT_ACTIVITY_RE.test(value)) return false;
     if (normalizedMsg) {
       if (value === normalizedMsg) return false;
-      if (value.includes(normalizedMsg)) return false;
+      if (value.includes(normalizedMsg) && !isAssistantOutputLine(value)) return false;
     }
     return true;
   });
@@ -353,13 +407,18 @@ async function pollRobotTailUntilResponse(
   params: {
     project: string;
     baseline: string[];
+    message: string;
     messageLastLine: string;
     timeoutMs: number;
     pollIntervalMs: number;
   },
 ): Promise<RobotPollResult> {
   const start = Date.now();
-  const baselineMatch = extractLatestMessageResponse(params.baseline, params.messageLastLine);
+  const baselineMatch = extractLatestMessageResponse(
+    params.baseline,
+    params.message,
+    params.messageLastLine,
+  );
   while (Date.now() - start < params.timeoutMs) {
     const tailResult = await runTail(api, params.project);
     if (tailResult.code && tailResult.code !== 0) {
@@ -367,7 +426,7 @@ async function pollRobotTailUntilResponse(
     }
 
     const lines = parseTailLines(`${tailResult.stdout ?? ""}${tailResult.stderr ?? ""}`);
-    const currentMatch = extractLatestMessageResponse(lines, params.messageLastLine);
+    const currentMatch = extractLatestMessageResponse(lines, params.message, params.messageLastLine);
     if (currentMatch.responseLines.length > 0) {
       const hasNewPrompt = currentMatch.promptCount > baselineMatch.promptCount;
       const responseChanged = !linesEqual(currentMatch.responseLines, baselineMatch.responseLines);
@@ -501,6 +560,7 @@ async function handleSendAndPoll(api: OpenClawPluginApi, rawArgs: string): Promi
   const pollResult = await pollRobotTailUntilResponse(api, {
     project,
     baseline,
+    message,
     messageLastLine: msgLastLine,
     timeoutMs,
     pollIntervalMs,
@@ -547,6 +607,7 @@ async function handleSendAndPollAsync(
       const pollResult = await pollRobotTailUntilResponse(api, {
         project,
         baseline,
+        message,
         messageLastLine: msgLastLine,
         timeoutMs,
         pollIntervalMs,

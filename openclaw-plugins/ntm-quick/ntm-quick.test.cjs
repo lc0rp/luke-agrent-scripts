@@ -195,6 +195,99 @@ test("/na saves project and /ns uses it for send+poll", async () => {
   assert.equal(sendCall.at(-1), "--msg=Hello world\n\n");
 });
 
+test("/ns supports multi-line input prompts", async () => {
+  const calls = [];
+  let tailCalls = 0;
+
+  const { commands } = registerCommands(async (argv) => {
+    if (argv[0] === "script") throw new Error("pty unavailable");
+    calls.push(argv);
+
+    if (argv[1] && String(argv[1]).startsWith("--robot-send=")) {
+      return { stdout: "", stderr: "", code: 0 };
+    }
+
+    if (argv[1] && String(argv[1]).startsWith("--robot-tail=")) {
+      tailCalls += 1;
+      if (tailCalls <= 2) {
+        return {
+          stdout: tailPayload(["› previous prompt", "", "  ? for shortcuts   70% context left"]),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return {
+        stdout: tailPayload([
+          "› First line of prompt",
+          "  second line of prompt",
+          "",
+          "• multiline response",
+        ]),
+        stderr: "",
+        code: 0,
+      };
+    }
+
+    return { stdout: "", stderr: "", code: 0 };
+  });
+
+  const na = commands.get("na");
+  const ns = commands.get("ns");
+
+  await na.handler(buildCtx("multiline-session"));
+  const response = await ns.handler(buildCtx("First line of prompt\nsecond line of prompt"));
+
+  assert.equal(response.text, "• multiline response");
+
+  const sendCall = calls.find((call) => call[1] === "--robot-send=multiline-session");
+  assert.ok(sendCall, "expected robot-send call");
+  assert.equal(sendCall.at(-1), "--msg=First line of prompt\nsecond line of prompt\n\n");
+});
+
+test("/ns keeps assistant responses that include the final input line", async () => {
+  let tailCalls = 0;
+  const token = "TOKEN_ABC_123";
+
+  const { commands } = registerCommands(async (argv) => {
+    if (argv[0] === "script") throw new Error("pty unavailable");
+
+    if (argv[1] && String(argv[1]).startsWith("--robot-send=")) {
+      return { stdout: "", stderr: "", code: 0 };
+    }
+
+    if (argv[1] && String(argv[1]).startsWith("--robot-tail=")) {
+      tailCalls += 1;
+      if (tailCalls <= 2) {
+        return {
+          stdout: tailPayload(["› old prompt", "", "  ? for shortcuts   70% context left"]),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return {
+        stdout: tailPayload([
+          "› Reply with token",
+          `  ${token}`,
+          "",
+          `• ${token}`,
+        ]),
+        stderr: "",
+        code: 0,
+      };
+    }
+
+    return { stdout: "", stderr: "", code: 0 };
+  });
+
+  const na = commands.get("na");
+  const ns = commands.get("ns");
+
+  await na.handler(buildCtx("echo-token-session"));
+  const response = await ns.handler(buildCtx(`Reply with token\n${token}`));
+
+  assert.equal(response.text, `• ${token}`);
+});
+
 test("/nc reads pane tail for saved project with default line count", async () => {
   const calls = [];
   const { commands } = registerCommands(async (argv) => {
@@ -358,6 +451,52 @@ test("/nsa sends async result back to the same channel context", async () => {
   const sendCall = calls.find((call) => call[1] === "--robot-send=my-session-async");
   assert.ok(sendCall, "expected robot-send call");
   assert.equal(sendCall.at(-1), "--msg=hello async\n\n");
+});
+
+test("/nsa supports multi-line input prompts", async () => {
+  let tailCalls = 0;
+  const { commands, outgoing } = registerCommands(async (argv) => {
+    if (argv[0] === "script") throw new Error("pty unavailable");
+
+    if (argv[1] && String(argv[1]).startsWith("--robot-send=")) {
+      return { stdout: "", stderr: "", code: 0 };
+    }
+    if (argv[1] && String(argv[1]).startsWith("--robot-tail=")) {
+      tailCalls += 1;
+      if (tailCalls <= 2) {
+        return {
+          stdout: tailPayload(["› old prompt", "", "  ? for shortcuts   70% context left"]),
+          stderr: "",
+          code: 0,
+        };
+      }
+      return {
+        stdout: tailPayload(["› line one", "  line two", "", "• async multiline response"]),
+        stderr: "",
+        code: 0,
+      };
+    }
+    return { stdout: "", stderr: "", code: 0 };
+  });
+
+  const na = commands.get("na");
+  const nsa = commands.get("nsa");
+
+  await na.handler(buildCtx("my-session-async-multiline"));
+  const ack = await nsa.handler(
+    withCtx("line one\nline two", {
+      channel: "telegram",
+      channelId: "telegram",
+      to: "telegram:-1001234567890",
+      from: "telegram:12345",
+      accountId: "acct-a",
+      messageThreadId: 17,
+    }),
+  );
+
+  assert.match(ack.text, /waiting for result/i);
+  await waitFor(() => outgoing.length > 0, 400);
+  assert.equal(outgoing[0].args[1], "• async multiline response");
 });
 
 test("/ns detects repeated response content when lines already exist in baseline", async () => {
