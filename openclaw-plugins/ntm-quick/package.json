@@ -1,0 +1,9 @@
+{
+  "name": "@openclaw/ntm-quick",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Quick ntm helpers for list, project assign, and robot send/poll.",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}

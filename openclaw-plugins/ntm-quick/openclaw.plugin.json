@@ -1,0 +1,10 @@
+{
+  "id": "ntm-quick",
+  "name": "ntm-quick",
+  "description": "Adds /nl, /na, /nc, /ns, /nsa commands for quick ntm list/assign/cat/send workflows.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

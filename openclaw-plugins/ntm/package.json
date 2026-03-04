@@ -1,0 +1,9 @@
+{
+  "name": "@openclaw/ntm",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Auto-reply /ntm commands backed by the ntm tmux helper.",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}
