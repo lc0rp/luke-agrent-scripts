@@ -1,7 +1,9 @@
 # Information architecture guidelines (for LLM and humans)
 
-Purpose of this document: keep the project documentation IA consistent, link-clean, and traceable after the migration to the numbered
-docs tree.
+Purpose of this document: keep the project dev-docs IA consistent, link-clean, and traceable after the migration to the numbered
+dev-docs tree.
+
+'Dev-docs' documents in-flight development work. The target user is a fellow developer working on the project, or a hand-off to another team. It answers: what is being built and what has been built. For user-facing documentation or future audiences, readers should be advised to see the `docs/` or `user-docs/` folders.
 
 ## Ground rules
 
@@ -14,7 +16,7 @@ docs tree.
   file.
 - When adding new content, update the nearest index to include it and ensure it traces back to PRD/epic/spec where
   relevant.
-- Archive, don’t delete: move superseded docs into `99-archive/` with a one-line reason and successor link.
+- Archive, don’t delete: move superseded dev-docs into `99-archive/` with a one-line reason and successor link.
 
 ## Commands
 
@@ -22,7 +24,7 @@ docs tree.
 - Check IA shape: `pnpm run lint:ia`
 - Fix wikilinks to markdown (if any): `pnpm run lint:links:fix`
 
-## How to add docs
+## How to add dev-docs
 
 1. Pick the correct lifecycle folder and create or reuse a subfolder; avoid new top-level buckets.
 2. Add/update `index.md` to mention the new file and its owner.
@@ -31,13 +33,13 @@ docs tree.
 
 ## Migration notes
 
-<!-- If migrating existing docs, document all changes in a migration note in
-`docs/06-delivery/migrations/docs-update-<date>/notes.md`. And append a note to this section !-->
+<!-- If migrating existing dev-docs, document all changes in a migration note in
+`dev-docs/06-delivery/migrations/dev-docs-update-<date>/notes.md`. And append a note to this section !-->
 
 {{MIGRATION_NOTES}}
 
 ## Ownership
 
-- Information architect / tech writer maintains this skill file and `docs/README.md`.
+- Information architect / tech writer maintains this skill file and `dev-docs/README.md`.
 - Scrum master ensures indexes are fresh at sprint boundaries.
 - Reviewers enforce IA checks in PRs (run lint tasks in CI).

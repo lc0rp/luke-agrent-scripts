@@ -2,10 +2,10 @@
 
 ## Luke rules (read first)
 
-First read:
+Must read, if exists:
 
 - On Linux Dev Box: `/data/projects/luke-agent-scripts/AGENTS.md`
-- On MacBook Pro: `~/Documents/dev/luke-agent-scripts/AGENTS.md`
+- On MacBook Pro: `/Users/luke/Documents/dev/luke-agent-scripts/AGENTS.md`
 
 ## Overview
 

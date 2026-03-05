@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 const root = process.cwd();
-const docsRoot = path.join(root, 'docs');
+const devDocsRoot = path.join(root, 'dev-docs');
 
 const expectedTop = [
   '00-foundation',
@@ -26,22 +26,22 @@ function exists(p) {
   try { fs.accessSync(p); return true; } catch { return false; }
 }
 
-// Ensure docs root exists
-if (!exists(docsRoot)) {
-  console.error('docs/ directory missing.');
+// Ensure dev-docs root exists
+if (!exists(devDocsRoot)) {
+  console.error('dev-docs/ directory missing.');
   process.exit(1);
 }
 
 // Check top-level IA folders and indexes
 for (const dir of expectedTop) {
-  const full = path.join(docsRoot, dir);
+  const full = path.join(devDocsRoot, dir);
   if (!exists(full)) {
-    errors.push(`Missing top-level folder: docs/${dir}`);
+    errors.push(`Missing top-level folder: dev-docs/${dir}`);
     continue;
   }
   const index = path.join(full, 'index.md');
   if (!exists(index)) {
-    errors.push(`Missing index.md in docs/${dir}/`);
+    errors.push(`Missing index.md in dev-docs/${dir}/`);
   }
 }
 
@@ -59,7 +59,7 @@ function checkHeadings(file) {
 }
 
 for (const dir of expectedTop) {
-  const index = path.join(docsRoot, dir, 'index.md');
+  const index = path.join(devDocsRoot, dir, 'index.md');
   if (exists(index)) {
     checkHeadings(index);
   }
@@ -67,23 +67,23 @@ for (const dir of expectedTop) {
 
 // Ensure README lists lifecycle links in order
 try {
-  const readme = fs.readFileSync(path.join(docsRoot, 'README.md'), 'utf8');
+  const readme = fs.readFileSync(path.join(devDocsRoot, 'README.md'), 'utf8');
   const requiredSequence = expectedTop;
   let lastIndex = -1;
   for (const seg of requiredSequence) {
     const idx = readme.indexOf(seg);
     if (idx === -1) {
-      errors.push(`docs/README.md missing reference to ${seg}`);
+      errors.push(`dev-docs/README.md missing reference to ${seg}`);
       break;
     }
     if (idx < lastIndex) {
-      errors.push('docs/README.md lifecycle links are out of order.');
+      errors.push('dev-docs/README.md lifecycle links are out of order.');
       break;
     }
     lastIndex = idx;
   }
 } catch (e) {
-  errors.push('Cannot read docs/README.md');
+  errors.push('Cannot read dev-docs/README.md');
 }
 
 // Guard against lingering wikilinks
@@ -102,7 +102,7 @@ function scanWikilinks(dir) {
     }
   }
 }
-scanWikilinks(docsRoot);
+scanWikilinks(devDocsRoot);
 
 if (errors.length) {
   console.error('IA validation failed:\n' + errors.map((e) => `- ${e}`).join('\n'));

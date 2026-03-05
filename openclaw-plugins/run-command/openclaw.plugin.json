@@ -1,0 +1,10 @@
+{
+  "id": "run-command",
+  "name": "Run Command",
+  "description": "Adds /run (and /r alias) command for shell execution plus quick-command shortcuts (/run help, +q, -q, q).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

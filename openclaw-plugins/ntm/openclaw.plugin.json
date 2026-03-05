@@ -1,0 +1,10 @@
+{
+  "id": "ntm",
+  "name": "ntm",
+  "description": "Adds /ntm (and /n alias) command for ntm session control plus quick-command shortcuts (/ntm help, +q, -q, q).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

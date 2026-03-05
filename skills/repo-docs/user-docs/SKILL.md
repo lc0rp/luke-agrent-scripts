@@ -1,9 +1,9 @@
 ---
-name: repo-documentation
+name: user-docs
 description: 
   Guidelines for documenting a repository project for four primary audiences; builders, operators, testers, and users. Use when creating or updating documentation to ensure clear intent, audience alignment, and maintainability.
 metadata:
-    short-description: Document a repository project
+    short-description: Document a repository project for builders, operators, testers, and users.
     type: Reference
     primary_audience: Documentation owners and contributors
     owner: Documentation program
@@ -12,7 +12,7 @@ metadata:
     source_of_truth: ./references/documentation_playbook.md
 ---
 
-# Repo Documentation Skill (Audience-First, Diataxis-Aligned)
+# User Docs Skill (Audience-First, Diataxis-Aligned)
 
 ## Purpose
 
@@ -26,6 +26,13 @@ This document describes a repeatable process for documenting a software project 
 The goal is to help a reader find the right page for their goal, at the right time, without guessing.
 
 This approach is project-agnostic. You can apply it to Proteus or any other project.
+
+# User Docs (user-docs) vs Dev Docs (dev-docs)
+
+- Dev-docs is designed for in-flight developer-facing documentation. 
+- User-docs is designed for steady-state, user-facing documentation. 
+- Dev-docs answers: what is being built and what has been built, for fellow developers. 
+- User-docs answers: how do I use this and how does it work, for end users or future audiences, who may include builders/developers, but it's not a place/process for in-flight work documentation.
 
 ## Core ideas (method)
 

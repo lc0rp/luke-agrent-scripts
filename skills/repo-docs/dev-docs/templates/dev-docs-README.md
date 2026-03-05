@@ -4,7 +4,9 @@ See [README.md](../README.md) for overall project context.
 
 ## Project documentation structure
 
-This project uses a standard IA docs structure designed to be scalable and LLM-friendly. This file acts as a single navigation point for the docs IA structure.
+This project uses a standard dev-docs IA docs structure designed to be scalable and LLM-friendly. This file acts as a single navigation point for the dev-docs IA structure.
+
+'Dev-docs' documents in-flight development work. The target user is a fellow developer working on the project, or a hand-off to another team. It answers: what is being built and what has been built. For user-facing documentation or future audiences, readers should be advised to see the `docs/` or `user-docs/` folders.
 
 Linking: standardize on markdown links (no wikilinks); run `pnpm run lint:links` to catch strays.
 
