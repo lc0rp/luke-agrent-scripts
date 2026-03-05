@@ -1,6 +1,6 @@
 ---
 name: luke-obsidian
-description: Understand Luke's second brain: Understand and interact with Luke's precious Obsidian vault, understand its structure, answer questions about notes and links, manage projects for Luke, run vault maintenance.
+description: Understand Luke's second brain; Understand and interact with Luke's precious Obsidian vault, understand its structure, answer questions about notes and links, manage projects for Luke, run vault maintenance.
 ---
 
 # Luke-Obsidian (usage)
@@ -18,6 +18,7 @@ This skill helps you undertand how Luke uses Obsidian, and to serve as his assis
 **The Obsidian Vault folder** / **vault**
 
 **AKA**:
+
 - "The vault"
 - "Obsidian"
 - "My Obsidian" / "Luke's Obsidian"
@@ -56,14 +57,15 @@ When any of these are used by Luke, or by you, they refer to:
   - No markdown links in external sharing; instead use link-to-obsidian URLs.
 
 **Ask first:**
+
 - Sending emails, tweets, public posts
 - Anything that leaves the machine
 - Anything you're uncertain about
 
 ## Preferred edit path
 
-1) Prioritize the [Obsidian CLI](https://help.obsidian.md/cli) for editing and traversing Luke's vault. 
-2) Only use direct file system access as an exception.
+1. Prioritize the [Obsidian CLI](https://help.obsidian.md/cli) for editing and traversing Luke's vault.
+2. Only use direct file system access as an exception.
 
 ## Output style
 

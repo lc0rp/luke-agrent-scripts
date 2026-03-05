@@ -1,5 +1,5 @@
----ask-questions-if-underspecified
-name: 
+---
+name: ask-questions-if-underspecified
 description: Clarify requirements before implementing. Do not use automatically, only when invoked explicitly.
 ---
 
@@ -63,6 +63,7 @@ Once you have answers, restate the requirements in 1-3 sentences (including key 
 - Use numbered questions with lettered options and a clear reply format
 
 **Recommended**
+
 ```text
 1) Scope?
    a) Minimal change (default)
