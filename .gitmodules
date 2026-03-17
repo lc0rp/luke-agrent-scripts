@@ -1,3 +1,6 @@
 [submodule "skills/kepano-obsidian-skills"]
 	path = skills/kepano-obsidian-skills
 	url = https://github.com/kepano/obsidian-skills
+[submodule "parked-skills/superpowers"]
+	path = parked-skills/superpowers
+	url = https://github.com/obra/superpowers.git
