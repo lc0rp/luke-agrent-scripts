@@ -1,124 +1,143 @@
 # AGENTS.md
 
-## Luke rules (read first)
+Shared Luke defaults. Use across repos unless local project docs say otherwise.
 
-Must read, if exists:
+## Purpose
 
-- On Linux Dev Box: `/data/projects/luke-agent-scripts/AGENTS.md`
-- On MacBook Pro: `/Users/luke/Documents/dev/luke-agent-scripts/AGENTS.md`
+- Keep `AGENTS.md` short.
+- Use repo docs as the system of record.
+- Put stable rules here; put project specifics in local docs/runbooks/specs.
 
-## Overview
+## Start and style
 
-Luke owns this. Start: say hi + 1 motivating line. Work style: telegraph; noun-phrases ok; drop grammar; min tokens.
+- Start: say hi + 1 motivating line.
+- Work style: telegraph; noun-phrases ok; drop filler; min tokens.
+- Luke owns the repo unless local docs say otherwise.
 
-- Whoami: Luke Kyohere (luke@kyohere.com, luke.kyohere@onafriq.com)
-- Workspaces: first of "/data/projects" (Linux Dev Box) or "~/Documents/dev" (MacBook Pro)
-- Bugs: add regression test when it fits.
-- Keep files <~500 LOC; split/refactor as needed.
-- Commits: Conventional Commits (feat|fix|refactor|build|ci|chore|docs|style|perf|test).
-- Prefer end-to-end verify; if blocked, say what’s missing.
-- New deps: quick health check (recent releases/commits, adoption).
-- Web: search early; quote exact errors; prefer 2024–2025 sources; fallback Firecrawl (pnpm mcp:\*) / mcporter.
-- Style: telegraph. Drop filler/grammar. Min tokens (global AGENTS + replies).
+## Luke defaults
 
-## Tool Selection
+- Whoami: Luke Kyohere (`luke@kyohere.com`, `luke.kyohere@onafriq.com`)
+- Workspaces: first of `/data/projects` (Linux Dev Box) or `~/Documents/dev` (MacBook Pro)
+- Model preference: latest only. OK: Anthropic Opus 4.6 / Sonnet 4.6, OpenAI GPT-5.4, xAI Grok-4.1 Fast, Google Gemini 3 Flash.
 
-When need to call tools from the shell, use this rubric:
+## Read order
 
-## File Operations
-- Include hidden and VCS-ignored files by default using fd `-H --no-ignore-vcs` flags
-- Follow symlinks by default using fd `-L` flag
-- Find files by file name: `fd -H --no-ignore-vcs -L`
-- Find files with path name: `fd -H --no-ignore-vcs -L -p <file-path>`
-- List files in a directory: `fd -H --no-ignore-vcs -L . <directory>`
-- Find files with extension and pattern: `fd -H --no-ignore-vcs -L -e <extension> <pattern>`
+1. Repo-local `AGENTS.md`
+2. `docs/` index, `README.md`, `ARCHITECTURE.md`, `dev-docs/README.md`, nearest task/spec docs
+3. Cross-linked docs with `Read when` hints
+4. This file as fallback baseline
 
-## Structured Code Search
-- Include hidden, dotfiles, and VCS-ignored files by default using ast-grep `--no-ignore hidden --no-ignore dot --no-ignore vcs` flags
-- Follow symlinks by default using ast-grep `--follow` flag
-- Find code structure: `ast-grep --no-ignore hidden --no-ignore dot --no-ignore vcs --follow --lang <language> -p '<pattern>'`
-- List matching files: `ast-grep --no-ignore hidden --no-ignore dot --no-ignore vcs --follow -l --lang <language> -p '<pattern>' | head -n 10`
-- Prefer `ast-grep` over `rg`/`grep` when you need syntax-aware matching
+If repo docs disagree with this file, follow repo docs.
 
-## Data Processing
+## Core working rules
+
+- Fix root cause, not symptoms.
+- If unsure, read more code/docs first; ask only when still blocked.
+- Web search early for unstable or current facts.
+- Quote exact errors.
+- Add regression tests when it fits.
+- Prefer red/green/refactor TDD for bugs, regressions, and risky behavior changes when practical.
+- Do not turn tests green with lazy stubs, placeholders, bypasses, or mock-heavy fake implementations unless that scope is explicitly requested.
+- Green tests are not enough; ensure the real implementation under the hood is complete, integrated, and production-ready.
+- Continue implementation with minimal human input until the task is production-ready or a real blocker requires escalation.
+- Keep files under ~500 LOC when practical; split before they sprawl.
+- Leave short breadcrumb notes in the thread.
+- Unrecognized changes: assume another agent; keep going unless they conflict.
+
+## Docs rules
+
+- `AGENTS.md` is a map, not the encyclopedia.
+- Start by checking `docs/` and nearby docs before coding.
+- Follow links until the domain makes sense.
+- Honor `Read when` hints.
+- Keep notes short; update docs when behavior or APIs change.
+- Add `read_when` hints on cross-cutting docs.
+- No ship with behavior drift and stale docs if docs are in scope.
+
+## Tool selection
+
+Use this hierarchy:
+
+- built-ins first when available and clearly better
+- `fd` for file/path discovery
+- `rg` for raw text
+- `ast-grep` for syntax-aware code search
+- `jq`/`yq` for structured data
+
+### File operations
+
+- Broad file/path discovery: `fd -H --no-ignore-vcs -L`
+  Includes hidden files, follows symlinks, ignores `.gitignore`; still respects `.ignore` and `.fdignore`.
+- Find by name: `fd -H --no-ignore-vcs -L <pattern>`
+- Find by path: `fd -H --no-ignore-vcs -L -p <path>`
+- List a directory: `fd -H --no-ignore-vcs -L . <directory>`
+- Find by extension and pattern: `fd -H --no-ignore-vcs -L -e <ext> <pattern>`
+
+### Structured code search
+
+- Use `ast-grep` when syntax matters:
+  `ast-grep --no-ignore hidden --no-ignore dot --no-ignore vcs --follow --lang <language> -p '<pattern>'`
+  Includes hidden files, follows symlinks, ignores `.ignore` and VCS ignore rules.
+- List matching files:
+  `ast-grep --no-ignore hidden --no-ignore dot --no-ignore vcs --follow -l --lang <language> -p '<pattern>' | head -n 10`
+
+### Data processing
+
 - JSON: `jq`
 - YAML/XML: `yq`
 
-## Selection
-- Select from multiple results deterministically (non-interactive filtering)
-- Fuzzy finder: `fzf --filter 'term' | head -n 1`
+### Selection
 
-## Guidelines
-- Prefer deterministic, non-interactive commands (`head`, `--filter`, `--json` + `jq`) so runs are reproducible
+- Prefer deterministic filtering: `head`, `--json`, `jq`, `--filter`
+- Fuzzy filter when needed: `fzf --filter 'term' | head -n 1`
 
-## Docs
-- Use repo-doc skill for docs discovery/understanding/maintenance.
-- Start: check docs/ folder and subs. Open docs before coding.
-- Follow links until domain makes sense; honor `Read when` hints.
-- Keep notes short; update docs when behavior/API changes (no ship w/o docs).
-- add `read_when` hints on cross-cutting docs.
-- Model preference: latest only. OK: Anthropic Opus 4.6 / Sonnet 4.6 (Sonnet 3.5 = old; avoid), OpenAI GPT-5.3-codex, xAI Grok-4.1 Fast, Google Gemini 3 Flash.
+## Validation and harness
 
-## Critical Thinking
-- Fix root cause (not band-aid).
-- Unsure: read more code; if still stuck, ask w/ short options.
-- Conflicts: call out; pick safer path.
-- Unrecognized changes: assume other agent; keep going; focus your changes. If it causes issues, stop + ask user.
-- Leave breadcrumb notes in thread.
+- Prefer end-to-end verify.
+- Prefer end-to-end or real user-flow verification for user-facing changes when feasible, not just unit coverage.
+- Run the highest validation level you can afford.
+- Before handoff: lint, typecheck, tests, docs checks, or best equivalent.
+- If blocked, say what is missing.
+- Keep runs observable: logs, screenshots, traces, browser tools, MCP tools when useful.
+- Keep artifacts in repo-local `output/` or task-local dirs, not scattered.
 
-## Build / Test
-- Before handoff: run full gate (lint/typecheck/tests/docs).
-- CI red: gh run list/view, rerun, fix, push, repeat til green.
-- Keep it observable (logs, panes, tails, MCP/browser tools).
-- Release: read docs/RELEASING.md (or find best checklist if missing).
+## Build and release
 
-## Releasing
-- Use semantic-release for versioning/tags/GitHub Releases; no manual release flow unless break-glass.
-- Enforce Conventional Commits with commitlint in CI.
-- Enforce commitlint locally before commit (pre-commit/commit-msg hook required).
-- Enforce local pre-push gate: lint + test must pass before push.
+- Release: read `docs/RELEASING.md` if present; otherwise find the nearest release checklist.
+- Use semantic-release when the repo standard says so; avoid manual release flow unless break-glass.
+- Prefer Conventional Commits.
+- Enforce commitlint locally/CI when the repo supports it.
 
-<frontend_aesthetics>
-Avoid “AI slop” UI. Be opinionated + distinctive.
+## Git rules
 
-Do:
+- Safe by default: `git status`, `git diff`, `git log`
+- `git checkout` OK for review or explicit request
+- Ask before branch changes unless the user explicitly asked
+- Push only when the user asks, or the repo workflow explicitly delegates it
+- No destructive ops without explicit consent: `reset --hard`, `clean`, `restore`, `rm`, mass rename/delete
+- No repo-wide search/replace scripts
+- Avoid manual `git stash`
+- No amend unless asked
+- Keep commits atomic: only files you touched
+
+## Frontend aesthetics
+
+Avoid AI-slop UI. Be opinionated and distinctive.
+
 - Typography: pick a real font; avoid Inter/Roboto/Arial/system defaults.
-- Theme: commit to a palette; use CSS vars; bold accents > timid gradients.
-- Motion: 1–2 high-impact moments (staggered reveal beats random micro-anim).
-- Background: add depth (gradients/patterns), not flat default.
-Avoid: purple-on-white clichés, generic component grids, predictable layouts.
-</frontend_aesthetics>
+- Theme: commit to a palette; use CSS vars; bold accents over timid gradients.
+- Motion: 1-2 high-impact moments; avoid random micro-animations.
+- Background: add depth; avoid flat defaults.
+- Avoid purple-on-white cliches, generic component grids, predictable layouts.
 
-## Git
-- Safe by default: git status/diff/log. Push only when user asks, or if in bd context, per beads protocol.
-- git checkout ok for PR review / explicit request.
-- Branch changes require user consent.
-- Destructive ops forbidden unless explicit (reset --hard, clean, restore, rm, …).
-- Remotes under ~/data/projects: prefer HTTPS; flip SSH->HTTPS before pull/push.
-- Commit helper on PATH: committer (bash). Prefer it; if repo has ./scripts/committer, use that.
-- Don’t delete/rename unexpected stuff; stop + ask.
-- No repo-wide S/R scripts; keep edits small/reviewable.
-- Avoid manual git stash; if Git auto-stashes during pull/rebase, that’s fine (hint, not hard guardrail).
-- If user types a command (“pull and push”), that’s consent for that command.
-- No amend unless asked.
-- Big review: git --no-pager diff --color=never.
-- Multi-agent: check `git status/diff` before edits; ship small commits.
-- Unrecognized changes: assume other agent; keep going; focus your changes. If it causes issues, stop + ask user.
-- Keep commits atomic: commit only files you touched and list each path explicitly.
-  - Tracked files: `git commit -m "<type(scope): message>" -- path/to/file1 path/to/file2`
-  - New files: `git restore --staged :/ && git add "path/to/file1" "path/to/file2" && git commit -m "<type(scope): message>" -- path/to/file1 path/to/file2`
+## Environment notes
 
-## Computer colloquial names/environment tips:
-1. devbox, ubuntu, linux, gateway: This computer.
-  - devbox GUI runs via KASM vnc session on display `:1`. Prepend `DISPLAY=:1 XAUTHORITY=$HOME/.Xauthority` to GUI commands like launching browsers.
-2. mac, macbook, mbp, Mac: Luke's MacBook Pro. Accessible via SSH. See "ssh tailscale to mac" skill.
+1. devbox, ubuntu, linux, gateway: this computer.
+   - GUI display: `:1`
+   - GUI prefix: `DISPLAY=:1 XAUTHORITY=$HOME/.Xauthority`
+2. mac, macbook, mbp, Mac: Luke's MacBook Pro.
 
-## Computer colloquial names/environment tips
+## SSH via Tailscale
 
-1. devbox, ubuntu, linux, gateway: - devbox GUI runs via KASM vnc session on display `:1`. Prepend `DISPLAY=:1 XAUTHORITY=$HOME/.Xauthority` to GUI commands like launching browsers.
-2. mac, macbook, mbp, Mac: - Luke's MacBook Pro.
-
-## SSH access via tailscale
-
-- If you are on a ubuntu linux machine, you're probably on the devbox. Access macbook via SSH. See "ssh tailscale to mac" skill.
-- If you are on the macbook, you can access the devbox via SSH. See "ssh tailscale to devbox" skill
+- On Linux Dev Box, access Mac via the `ssh-tailscale-luke-mac` skill.
+- On MacBook Pro, access Dev Box via the `ssh-tailscale-luke-devbox` skill.
