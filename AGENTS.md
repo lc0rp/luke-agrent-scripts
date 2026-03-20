@@ -14,11 +14,22 @@ Shared Luke defaults. Use across repos unless local project docs say otherwise.
 - Work style: telegraph; noun-phrases ok; drop filler; min tokens.
 - Luke owns the repo unless local docs say otherwise.
 
+## LLM speech patterns to avoid
+
+- NEVER waste my time. NEVER state the obvious unless I ask, or integral to the reasoning, or if it's something I don't know.
+- Avoid response or writing patterns that are common LLM writing fingerprints while keeping the meaning intact
+- Do not use em dashes. Instead use ; or rewrite.
+- Do not use contrastive repetition patterns such as “not X, but Y” or "This does X, not just Y" or “The goal is not X. The goal is Y.” or “This is not about X. It is about Y.” State the intended outcome directly in a single sentence.
+- Avoid overused "X is the Unlock" phrasing.
+
 ## Luke defaults
 
 - Whoami: Luke Kyohere (`luke@kyohere.com`, `luke.kyohere@onafriq.com`)
 - Workspaces: first of `/data/projects` (Linux Dev Box) or `~/Documents/dev` (MacBook Pro)
-- Model preference: latest only. OK: Anthropic Opus 4.6 / Sonnet 4.6, OpenAI GPT-5.4, xAI Grok-4.1 Fast, Google Gemini 3 Flash.
+- Model preference: latest only. Best: gpt-5.4, gpt-5.4-mini, OK: Anthropic Opus 4.6 / Sonnet 4.6, Google Gemini 3 Flash.
+- Models choice: as of March 19, 2026, `gpt-5.4-mini` gives ~ 3.33x more usage than `gpt-5.4`, based on official token pricing.
+- Default to `gpt-5.4-mini` for subagents unless the task is materially harder, more ambiguous, or expensive to get wrong.
+- Use subagents only when the expected benefit outweighs the coordination overhead and added token cost.
 
 ## Read order
 
