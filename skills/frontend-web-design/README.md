@@ -3,6 +3,7 @@
 This skill is for browser-based UI work inside Codex or GPT.
 
 It is designed to help a non-designer get much better frontend output by forcing a stronger workflow:
+
 - pick a visual direction
 - freeze a small design system early
 - build on real primitives
@@ -30,6 +31,7 @@ It is designed to help a non-designer get much better frontend output by forcing
 ## What To Ask For
 
 Good requests:
+
 - "Use `frontend-web-design` to redesign this dashboard so it feels editorial and data-dense."
 - "Use `frontend-web-design` and give me 3 distinct directions before coding."
 - "Use `frontend-web-design` and freeze a token system before implementation."
@@ -37,6 +39,7 @@ Good requests:
 - "Use `frontend-web-design` and make this stop looking like generic AI UI."
 
 Useful additions:
+
 - target audience
 - product tone
 - screenshots
@@ -73,6 +76,7 @@ Include realistic states, mobile behavior, and a final critique pass.
 The skill is built from a curated set of official docs, public skills, and design primers. The main sources are listed in [references/sources.md](references/sources.md).
 
 Core ideas it borrows:
+
 - explicit visual direction beats vague taste
 - screenshots beat text-only prompting for visual polish
 - design tokens and real component systems reduce drift
@@ -82,6 +86,7 @@ Core ideas it borrows:
 ## Further Reading
 
 Start here:
+
 - [references/sources.md](references/sources.md)
 - [references/style-system-template.md](references/style-system-template.md)
 - [references/prompt-recipes.md](references/prompt-recipes.md)

@@ -7,12 +7,14 @@ Use it when the skill starts feeling stale, too verbose, too generic, or misalig
 ## Upgrade Goals
 
 Preserve:
+
 - concise trigger metadata
 - strong anti-generic guidance
 - web-only scope
 - practical, implementation-friendly advice
 
 Improve:
+
 - current source quality
 - stack recommendations
 - prompt recipes
@@ -22,6 +24,7 @@ Improve:
 ## When To Upgrade
 
 Upgrade when:
+
 - official OpenAI, v0, or shadcn guidance changes
 - better public frontend design skills appear
 - the skill starts producing repetitive aesthetics
@@ -41,6 +44,7 @@ Upgrade when:
 ## Research Standard
 
 Favor this order:
+
 1. official docs
 2. primary-source public skills or repos
 3. strong design primers for non-designers
@@ -53,6 +57,7 @@ Avoid adding weak listicles, SEO filler, or untested prompt libraries.
 Keep the "top 10" curated, not exhaustive.
 
 A source should stay only if it meaningfully strengthens at least one of:
+
 - visual direction
 - design-system discipline
 - screenshot-driven iteration
@@ -76,6 +81,7 @@ Remove sources that duplicate stronger ones.
 ## Quality Bar For Changes
 
 The upgraded skill should make these more likely:
+
 - clearer design direction
 - less generic layout and styling
 - fewer fake dashboard patterns
@@ -86,12 +92,14 @@ The upgraded skill should make these more likely:
 ## Validation Prompts
 
 Test the skill on prompts like:
+
 - redesign a cluttered B2B dashboard
 - build a polished settings page from scratch
 - convert a rough screenshot into a real web screen
 - create a landing page without drifting into generic startup visuals
 
 Check whether the output:
+
 - names a direction
 - freezes tokens early
 - avoids template AI tropes
@@ -109,6 +117,7 @@ Check whether the output:
 ## Optional Future Additions
 
 Only add these if they prove useful:
+
 - a browser screenshot critique script
 - a small token scaffolder
 - stack-specific sub-references for Next.js, plain HTML/CSS, and React
