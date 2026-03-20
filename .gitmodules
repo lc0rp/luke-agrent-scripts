@@ -4,3 +4,6 @@
 [submodule "parked-skills/superpowers"]
 	path = parked-skills/superpowers
 	url = https://github.com/obra/superpowers.git
+[submodule "skills/dimillian-skills"]
+	path = skills/dimillian-skills
+	url = https://github.com/Dimillian/Skills.git
