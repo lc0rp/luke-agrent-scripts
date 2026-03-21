@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Harvester"
+  short_description: "Harvest session learnings into new or updated skills"
+  default_prompt: "Use $skill-harvester to review the current session for reusable skill opportunities, recommend the highest-value new or updated skill work, and implement it."
