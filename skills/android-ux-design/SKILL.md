@@ -112,10 +112,16 @@ Use Compose as the default mental model when the app is modern Android.
 
 ### 5. Use preview-first and screenshot-first iteration
 
-When possible:
-- use Compose previews and multipreview annotations
+This is a completion gate, not a suggestion:
+- use Compose previews and multipreview annotations when helpful
 - capture emulator screenshots
 - critique actual rendered UI instead of relying only on code reading
+- after the final code change, relaunch the target screen and inspect the final rendered result on the emulator or device
+- if app state, reinstall, login, navigation, or setup flow blocks the target screen, restore that state and verify the real target screen anyway
+- do not treat green tests, code inspection, or earlier screenshots as sufficient
+- when the user cares about alignment, spacing, or “match this screen,” compare the latest render against the latest approved screenshot, not just the latest reference
+- if the change adds top-bar actions, settings buttons, back buttons, badges, or other chrome, verify that the chrome does not unintentionally push the rest of the screen down
+- verify icons as rendered pixels, not just as view presence: catch broken tints, fallback circles, blank placeholders, clipping, and wrong hit-area chrome
 
 Image-guided refinement catches density, touch affordance, and rhythm issues faster than text-only prompting.
 
@@ -130,6 +136,16 @@ Before handoff, audit:
 - edge-to-edge/system bars
 - adaptive layout behavior
 - realism of states and content
+- whether the final rendered screen matches the latest user-provided reference image
+- whether key anchors stayed on the intended vertical baseline after the last change
+- whether screen-to-screen shared anchors still line up when the design system is meant to match across screens
+
+If the final target screen was not visually verified after the last change, the task is incomplete.
+
+When placement is part of the requirement, add at least one regression that protects geometry, not just visibility or copy. Examples:
+- assert top bar height stays below or above a threshold
+- assert a key card or title anchor stays within an expected Y range
+- assert a new action control is present without increasing the layout height when it should overlay instead
 
 Use [references/review-checklist.md](references/review-checklist.md).
 
@@ -193,6 +209,8 @@ Use [references/review-checklist.md](references/review-checklist.md).
 - If screenshots exist, treat them as primary visual truth.
 - If screenshots do not exist, create a brief Android theme artifact before substantial implementation.
 - Prefer complete, runnable screens over isolated component fragments.
+- Never claim Android UI work is complete without a post-change emulator or device inspection of the affected screen.
+- Never infer final visual correctness from code structure, prior screenshots, or test results.
 
 ## Read When
 
@@ -216,5 +234,8 @@ For substantial Android UI work, leave behind:
 - realistic states
 - accessibility-conscious interactions
 - a short note on what changed and why
+- which screens were visually verified after the last code change
+- which emulator or device was used
+- whether the final rendered result matched the latest reference
 
 Aim for Android-native, product-specific UI that feels deliberate instead of generic.

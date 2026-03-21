@@ -107,10 +107,20 @@ Use this hierarchy:
 - Prefer end-to-end verify.
 - Prefer end-to-end or real user-flow verification for user-facing changes when feasible, not just unit coverage.
 - Run the highest validation level you can afford.
+- For screenshot-driven UI work, you MUST relaunch the real surface after the final code change and inspect the final rendered UI on the target device, emulator, browser, or app runtime before calling the task complete.
+- For screenshot-driven UI work, you MUST compare the final rendered result against the latest user-provided reference image when one exists.
+- For screenshot-driven UI work, green tests, code review, prior screenshots, and reasoning from code DO NOT count as completion.
+- If reinstall, reset, navigation, auth, fixtures, or app state changes block access to the target UI, you MUST restore the required state and verify the actual target screen anyway.
+- If you cannot visually verify the final target screen after the last change, you MUST report the task as incomplete. You MUST state exactly what remains unverified. You MUST NOT imply completion.
 - Before handoff: lint, typecheck, tests, docs checks, or best equivalent.
 - If blocked, say what is missing.
 - Keep runs observable: logs, screenshots, traces, browser tools, MCP tools when useful.
 - Keep artifacts in repo-local `output/` or task-local dirs, not scattered.
+
+## UI completion
+
+- For UI tasks, the final answer MUST say which rendered screens were visually verified after the last code change, which device or emulator was used, and whether the result matched the latest reference.
+- If that visual verification did not happen, you MUST NOT present the UI task as complete, done, finished, shipped, ready, resolved, or equivalent.
 
 ## Build and release
 
