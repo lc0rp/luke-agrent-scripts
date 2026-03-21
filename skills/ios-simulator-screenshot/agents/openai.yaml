@@ -1,0 +1,4 @@
+interface:
+  display_name: "iOS Simulator Screenshot"
+  short_description: "Capture iOS Simulator screenshots"
+  default_prompt: "Use $ios-simulator-screenshot to capture the current iOS Simulator screen or create a stitched full-page screenshot from a scrollable view."

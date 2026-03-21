@@ -116,6 +116,8 @@ When possible:
 - run the simulator
 - critique from visuals, not only from code
 
+For explicit simulator screenshot capture or stitched full-page export requests, use `$ios-simulator-screenshot`.
+
 Screenshot and simulator loops are much better than text-only guessing for spacing, affordance, and density.
 
 ### 6. Review with a hard checklist
