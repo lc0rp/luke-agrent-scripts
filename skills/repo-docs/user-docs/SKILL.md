@@ -7,8 +7,8 @@ metadata:
     type: Reference
     primary_audience: Documentation owners and contributors
     owner: Documentation program
-    last_verified: 2026-02-06
-    next_review_by: 2026-05-06
+    last_verified: 2026-03-22
+    next_review_by: 2026-06-22
     source_of_truth: ./references/documentation_playbook.md
 ---
 
@@ -39,7 +39,7 @@ This approach is project-agnostic. You can apply it to Proteus or any other proj
 1. Every page must have one clear intent.
 2. Every page must state one primary audience.
 3. Documentation must match the user journey (lifecycle).
-4. Hubs must route users. Hubs must not duplicate content.
+4. Start pages must route readers. Start pages must not duplicate content.
 5. Every page must have an owner and review cadence, so it stays correct.
 
 ## Terms and definitions
@@ -98,7 +98,7 @@ Every page must include this metadata (frontmatter is preferred):
 - `owner`: role or team (not only a person)
 - `last_verified`: date or product version
 - `next_review_by`: date
-- `source_of_truth`: link to the canonical source (PRD, code, API spec, ticket, policy, runbook)
+- `source_of_truth`: link to the authoritative source (PRD, code, API spec, ticket, policy, runbook)
 
 ## The workflow (step by step)
 
@@ -152,7 +152,7 @@ Typical workstreams map well to the four audiences:
 
 Output:
 
-- A short workstream list in the project hub.
+- A short workstream list on the project start page.
 
 ### Step 3: Build a content matrix (Audience + Intent + Lifecycle)
 
@@ -179,14 +179,14 @@ Builders:
 
 - Implement: Tutorial: “Run locally to first success”.
 - Implement: Reference: “Environment configuration”.
-- Operate: How-to: “Run tests and quality gates”.
+- Operate: How-to: “Run tests and quality checks”.
 - Change: How-to: “Deploy a preview and deploy production”.
 - Troubleshoot: Reference: “Common failures and fixes”.
 
 Testers:
 
 - Implement: Reference: “Test levels and scope”.
-- Implement: How-to: “Run the full test gate locally”.
+- Implement: How-to: “Run the full local test checks”.
 - Use: How-to: “Add a new automated test (pattern and folder)”.
 - Change: How-to: “Verify a release (smoke tests and critical paths)”.
 - Troubleshoot: Reference: “Common test failures and fixes”.
@@ -205,32 +205,32 @@ Users:
 - Use: How-to: “Export and share”.
 - Troubleshoot: How-to: “No results”.
 
-### Step 4: Create hubs (routing pages)
+### Step 4: Create start pages (routing pages)
 
-Hubs are “start here” pages. They should be stable and written in the reader’s language.
+Start pages are “start here” pages. They should be stable and written in the reader’s language.
 
 Rules:
 
-- A hub should mostly be links.
-- A hub should cover the main entry points for the audience.
-- A hub should link to a small number of high-value pages for each lifecycle stage.
+- A start page should mostly be links.
+- A start page should cover the main entry points for the audience.
+- A start page should link to a small number of high-value pages for each lifecycle stage.
 
-Minimum hubs for most projects:
+Minimum start pages for most projects:
 
-- Builders hub
-- Testers hub
-- Operators hub
-- Users hub
+- Builders start page
+- Testers start page
+- Operators start page
+- Users start page
 
-Optional extra hubs:
+Optional extra start pages:
 
-- Troubleshooting hub
-- Change hub (release notes, migrations, deprecations)
+- Troubleshooting start page
+- Change start page (release notes, migrations, deprecations)
 
 Output:
 
-- `docs/<project>/index.md` (project hub)
-- One hub per primary audience
+- `docs/<project>/index.md` (project start page)
+- One start page per primary audience
 
 ### Step 5: Write the pages in priority order
 
@@ -259,6 +259,19 @@ Use these rules:
 - Define acronyms the first time you use them.
 - Avoid jokes and idioms.
 - Prefer lists for steps and requirements.
+
+### Step 5.2: Keep language global and plain
+
+These docs may be read by people in many countries. Use international plain English with as little jargon as possible.
+
+As a quick test: if a term sounds like it came from a PM team, platform team, or SaaS marketing page in San Francisco, rewrite it in more neutral language.
+
+Prefer safer, more widely understood wording such as:
+
+- `canonical` -> `authoritative`, `official`, `standard`, `reference`
+- `hub` -> `knowledge base`, `center`, `portal`, `section`, `library`, `start page`
+- `gates` -> `checks`, `approval steps`, `entry criteria`, `release criteria`
+- `guardrails` -> `boundaries`, `constraints`, `rules`, `safeguards`, `guidance`
 
 ### Step 6: Add review and verification steps
 
@@ -292,10 +305,10 @@ Output:
 If you are documenting a different project:
 
 1. Replace “Proteus” with your project name.
-2. Keep the same four primary hubs (Builders, Testers, Operators, Users).
+2. Keep the same four primary start pages (Builders, Testers, Operators, Users).
 3. Build the content matrix from your project’s real change triggers and support questions.
 4. Ensure every page has metadata and an owner.
-5. Keep hubs link-only and keep content pages intent-pure.
+5. Keep start pages link-only and keep content pages intent-pure.
 
 ## Bundled references
 

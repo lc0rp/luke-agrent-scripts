@@ -1,25 +1,26 @@
 ---
 name: frontend-web-design
-description: Create world-class frontend web UI/UX inside Codex or GPT. Use this skill when building or redesigning websites, web apps, landing pages, dashboards, design systems, React components, HTML/CSS layouts, or any browser-based interface where generic AI aesthetics are a risk. It improves visual direction, information hierarchy, design-system discipline, responsive behavior, accessibility, motion restraint, screenshot-driven iteration, and anti-template taste. It is optimized for non-designers who still want polished, memorable, product-appropriate interfaces.
+description: Create world-class frontend web UI/UX inside Codex or GPT. Use this skill when building or redesigning websites, web apps, landing pages, dashboards, design systems, React components, HTML/CSS layouts, or any browser-based interface where generic AI aesthetics are a risk. It improves art direction, composition, image-led hierarchy, narrative page structure, design-system discipline, responsive behavior, accessibility, motion restraint, screenshot-driven iteration, and anti-template taste for non-designers who still want polished, memorable, product-appropriate interfaces.
 ---
 
 # Frontend Web Design
 
-Use this skill for browser-based UI work.
+Use this skill for browser-based UI work where taste, hierarchy, structure, imagery, and interaction quality matter.
 
 This skill exists to stop generic AI UI and replace it with a tighter workflow:
-- choose an explicit visual direction
+- start with composition, not components
+- pick an explicit visual direction
 - freeze a small design system early
-- build on real components and tokens
-- iterate with screenshots, not only text
-- review hierarchy, responsiveness, and accessibility before handoff
+- use screenshots, mood boards, or generated visuals as guardrails
+- structure the page or screen as a narrative
+- verify visually in browser before handoff
 
 ## Scope
 
 In scope:
 - websites
 - web apps
-- marketing pages
+- landing pages
 - dashboards
 - settings screens
 - design-system refreshes
@@ -29,170 +30,247 @@ In scope:
 Out of scope:
 - native iOS, Android, macOS design
 - print or slide design
-- logo/brand identity creation from scratch unless it directly supports a web UI task
+- logo or full brand identity creation unless it directly supports a web UI task
 
-## Default Operating Mode
+## GPT-5.4 Quickstart
 
-Assume the user wants strong design with clear intention.
+When model settings are available, start at low reasoning for straightforward web work. Use medium only when the design or implementation is materially more complex.
 
 Before coding:
-1. Identify product type, audience, primary task, and tone.
-2. Pick one design direction with a short name.
-3. Freeze a minimal system: type, color, spacing, radius, shadows, motion.
-4. Prefer an existing component system or app style over invention.
-5. Decide what should feel memorable on first load.
+1. Define the design system and constraints up front.
+2. Gather visual guardrails: screenshot, mood board, or generated visual options.
+3. Define a narrative or content strategy.
+4. Use real product context and real copy whenever possible.
 
-Then build:
-1. Establish layout and hierarchy before decoration.
-2. Use tokens and CSS variables early.
-3. Make every screen state believable: empty, loading, error, hover, focus, active, disabled.
-4. Make desktop and mobile both real.
-5. Validate with screenshots or browser review when feasible.
+## Design Dials
 
-## Non-Negotiables
+When the request is open-ended, set these explicitly:
+- `DESIGN_VARIANCE` 1-10: how experimental the layout should be
+- `MOTION_INTENSITY` 1-10: how visible and frequent motion should be
+- `VISUAL_DENSITY` 1-10: how much content should fit on screen
 
-- No vague aesthetic. Name the direction.
-- No default AI SaaS look.
-- No purple-on-white fallback.
-- No decorative hero blocks inside product UI unless the product genuinely needs them.
-- No fake charts, fake metrics, or filler panels.
-- No over-rounded everything.
-- No excessive glassmorphism, blur haze, or gradient fog as the default visual language.
-- No decorative copy that explains the UI instead of letting the UI explain itself.
-- No typography-by-default. Pick a real point of view.
-- No component soup. The interface should feel like one product.
+Defaults:
+- marketing pages: `DESIGN_VARIANCE 6`, `MOTION_INTENSITY 5`, `VISUAL_DENSITY 4`
+- product UI: `DESIGN_VARIANCE 3`, `MOTION_INTENSITY 3`, `VISUAL_DENSITY 7`
+
+Raise these only with intent. More is not better.
+
+## Working Model
+
+Before building, write three things:
+- visual thesis: one sentence describing mood, material, energy, and level of restraint
+- content plan: the section sequence or screen narrative
+- interaction thesis: 2 or 3 motion ideas that change the feel of the work
+
+Each section gets one job, one dominant visual idea, and one primary takeaway or action.
+
+Use [references/style-system-template.md](references/style-system-template.md) when you need a quick artifact.
+
+## Core Defaults
+
+- Start with composition, not components.
+- Treat the first viewport as a poster, not a document.
+- Make the brand or product unmistakable in the first screen on branded pages.
+- Prefer one strong visual anchor over many medium-strength elements.
+- Use whitespace, scale, alignment, cropping, and contrast before adding chrome.
+- Limit the system: two typefaces max, one accent color by default.
+- Default to cardless layouts. Use sections, columns, dividers, media blocks, and tables before adding panels.
+- Write in product language, not design commentary.
 
 ## Preferred Workflow
 
-### 1. Lock the design brief
+### 1. Lock the brief
 
 Create or infer:
 - product goal
-- target user
-- key jobs-to-be-done
+- audience
+- primary task
 - tone
 - constraints
 - success criteria
 
 If the request is underspecified, make the smallest reasonable assumption set and state it briefly.
 
-Use [references/style-system-template.md](references/style-system-template.md) when you need a quick artifact.
+### 2. Establish visual guardrails
 
-### 2. Explore direction before polishing
+When possible:
+- use uploaded screenshots first
+- otherwise generate a mood board or a few image directions
+- otherwise ask the user for references
 
-Generate 2 or 3 distinct directions internally or briefly in chat:
-- conservative and credible
-- expressive and memorable
-- dense and utilitarian
+Default to uploaded or pre-generated images when they exist. If image generation is available and the task benefits from it, create visuals that match the intended style. Do not rely on random web images unless the user explicitly asks for them.
 
-Then choose one. Do not average them together.
-
-### 3. Freeze the system early
+### 3. Freeze the system
 
 Define:
-- typography pair or font strategy
-- color tokens
+- typography roles: display, headline, body, caption
+- core tokens: background, surface, text, muted, accent, border, focus
 - spacing scale
 - radius scale
-- border treatment
-- shadow policy
+- border and shadow policy
 - motion policy
 
 Prefer CSS variables or design tokens.
 
-Read [references/install-recipes.md](references/install-recipes.md) if you need a practical base stack.
+### 4. Choose the layout mode
 
-### 4. Build from real primitives
+For landing pages:
+- hero
+- support
+- detail
+- proof when needed
+- final CTA
+
+For app surfaces:
+- primary workspace
+- navigation
+- secondary context or inspector
+- one clear accent for action or state
+
+Read [references/prompt-recipes.md](references/prompt-recipes.md) for concrete patterns.
+
+### 5. Build from real primitives
 
 Prefer:
 - existing project components first
+- React plus Tailwind when a greenfield web stack is appropriate
 - shadcn/ui or equivalent tokenized components next
 - Radix primitives when interaction complexity matters
 - AI Elements or Prompt Kit patterns for AI-native product surfaces
 
-Do not ask the model to invent a large component library from scratch unless the task explicitly requires it.
+Do not invent a large component library from scratch unless the task explicitly requires it.
 
-### 5. Use image-first iteration
+Implementation guardrails:
+- check the dependency file before adding imports or new libraries
+- prefer CSS Grid over fragile flexbox percentage math for multi-column layout
+- use `min-height: 100dvh` or equivalent instead of naive `100vh` full-screen sections when mobile browser chrome matters
+- use semantic HTML where it improves structure and accessibility
+- use tabular figures or monospace numerals for dense numeric UI when scan speed matters
 
-When possible:
-- ask for or capture screenshots
-- compare generated UI against screenshots
-- perform critique passes from visuals, not just code
+### 6. Verify visually
 
-Image-guided refinement usually beats text-only prompting for spacing, balance, and visual hierarchy.
+Use Playwright or equivalent browser inspection when visual QA matters and tools are available.
 
-### 6. Review with a hard checklist
-
-Before handoff, audit against:
-- hierarchy
-- information density
-- responsiveness
-- keyboard and focus states
-- contrast
-- loading/empty/error states
-- content realism
-- motion restraint
+Check:
+- multiple viewports
+- state transitions
+- navigation flows
+- visual similarity to screenshots or references
+- overlap from fixed or floating elements
+- optical alignment of icons, buttons, and mixed text blocks
+- whether all requested deliverables are actually finished
 
 Use [references/review-checklist.md](references/review-checklist.md).
 
-## Design Heuristics
+## Landing Pages
 
-### Hierarchy
+Default sequence:
+1. Hero: brand or product, promise, CTA, and one dominant visual
+2. Support: one concrete feature, offer, or proof point
+3. Detail: atmosphere, workflow, or product depth
+4. Final CTA: convert, start, visit, or contact
 
-- Make the primary action obvious in under 3 seconds.
-- Use fewer emphasis levels, not more.
-- Group related controls tightly.
-- Keep labels literal and short.
-- Remove sections that only repeat page context.
+Hero rules:
+- One composition only.
+- Prefer a full-bleed image or dominant visual plane by default.
+- Keep the brand or product name at hero strength.
+- Keep the text column narrow and anchored to a calm area.
+- Keep headlines readable in one glance.
+- Keep the first viewport small in scope: brand, one headline, one short supporting sentence, one CTA group, one dominant image.
+- No hero cards, stat strips, logo clouds, pill soup, floating dashboards, or detached promo overlays by default.
+- If the first viewport still works after removing the image, the image is too weak.
+- If the brand disappears after hiding the nav, the hierarchy is too weak.
 
-### Layout
+## App Surfaces
 
-- Prefer stable structure over novelty for app screens.
-- Use asymmetry only when it improves scanning or brand character.
-- Keep edge alignment clean.
-- Density is allowed when the product benefits from it.
+Default to restrained, calm product UI:
+- strong typography and spacing
+- few colors
+- dense but readable information
+- minimal chrome
+- cards only when the card is the interaction
 
-### Typography
+Avoid:
+- dashboard-card mosaics
+- thick borders around every region
+- decorative gradients behind routine product UI
+- multiple competing accent colors
+- ornamental icons that do not improve scanning
+- marketing hero copy inside utility screens unless explicitly requested
 
-- Choose a type system on purpose.
-- Use contrast through size, weight, and rhythm before using color.
-- Avoid ornamental micro-labels and fake sophistication.
+If a panel can become plain layout without losing meaning, remove the card treatment.
 
-### Color
+## Imagery
 
-- Start from a restrained palette.
-- Use accent color for action or meaning, not everywhere.
-- Make neutrals do most of the structural work.
+Imagery must do narrative work.
 
-### Motion
+- Use at least one strong, real-looking image for brands, venues, editorial pages, and lifestyle products.
+- Prefer in-situ photography over abstract gradients or fake 3D objects.
+- Choose or crop images with a stable tonal area for text.
+- Do not use images with embedded signage, logos, or typographic clutter that fights the UI.
+- Do not use images with built-in UI frames, cards, or panels.
+- If multiple moments are needed, use multiple images, not one collage.
 
-- One meaningful entrance sequence is better than many random animations.
-- Favor opacity, filter, and small position changes over exaggerated transforms.
-- Respect reduced-motion preferences.
+The first viewport needs a real visual anchor. Decorative texture is not enough.
 
-### Components
+## Copy
 
-- Buttons should look tappable and trustworthy.
-- Inputs should be plain, readable, and stateful.
-- Tables and lists should prioritize scan speed.
-- Cards are optional, not mandatory.
+- Write in product language, not design commentary.
+- Let the headline carry the meaning.
+- Supporting copy should usually be one short sentence.
+- Cut repetition between sections.
+- Give every section one responsibility: explain, prove, deepen, or convert.
+- Use utility copy for dashboards, admin tools, and workspaces.
+- If a sentence could appear in a homepage hero or ad, rewrite it until it sounds like product UI.
+- If deleting 30 percent of the copy improves the page, keep deleting.
+- Avoid stock AI wording and startup filler.
 
-### Copy
+## Motion
 
-- Prefer product language over generic startup language.
-- Use concrete nouns and verbs.
-- Do not add filler marketing lines inside utility screens.
+Use motion to create presence and hierarchy, not noise.
+
+For visually led work, ship 2 or 3 intentional motions:
+- one entrance sequence
+- one scroll-linked, sticky, or depth effect
+- one hover, reveal, or layout transition that sharpens affordance
+
+Prefer Framer Motion or Motion when available.
+
+Motion rules:
+- smooth on mobile
+- fast and restrained
+- consistent across the page
+- removed if ornamental only
+
+Keep fixed or floating UI elements from overlapping text, buttons, or key content across screen sizes. Place them in safe areas and verify them at multiple breakpoints.
+
+## Hard Rules
+
+- No cards by default.
+- No hero cards by default.
+- No boxed or center-column hero when the brief calls for full bleed.
+- No more than one dominant idea per section.
+- No more than two typefaces without a clear reason.
+- No more than one accent color unless the product already has a strong system.
+- No generic SaaS card grid as the first impression.
+- No beautiful image with weak brand presence.
+- No busy imagery behind text.
+- No filler copy.
+- No decorative copy that explains the UI instead of serving the product.
+- No fake charts, fake metrics, or filler panels.
+- No unfinished outputs, placeholder comments, or "same pattern continues" shortcuts when the task calls for real implementation.
 
 ## Codex / GPT Execution Rules
 
 - Read the local codebase before introducing a new visual language.
-- Preserve the product's existing identity when one exists.
-- If the current UI is weak or generic, improve it without breaking the product's information architecture.
-- Use `Playwright` or equivalent browser inspection when visual QA matters and tools are available.
-- If the user gives screenshots, use them as primary visual truth.
-- If no screenshots exist, create a brief system artifact before large implementation work.
+- Preserve the product's existing identity when it is strong.
+- If the current UI is weak or generic, improve it without breaking the information architecture.
+- If screenshots exist, use them as primary visual truth.
+- If screenshots do not exist, create a brief style system and visual direction artifact before large implementation work.
 - Prefer complete, runnable UI over mock fragments.
 - Always account for mobile web behavior, even when desktop is the main target.
+- Ground the work in real content, real product context, and real interactions.
+- Do not rewrite the stack for a redesign pass unless the user explicitly asks for it.
 
 ## Read When
 
@@ -206,11 +284,15 @@ Use [references/review-checklist.md](references/review-checklist.md).
   [references/review-checklist.md](references/review-checklist.md)
 - Need stack and install guidance:
   [references/install-recipes.md](references/install-recipes.md)
+- Need an audit-first workflow for an existing UI:
+  [/Users/luke/Documents/dev/luke-agent-scripts/skills/frontend-redesign-audit/SKILL.md](/Users/luke/Documents/dev/luke-agent-scripts/skills/frontend-redesign-audit/SKILL.md)
 
 ## Output Expectations
 
 For substantial UI work, leave behind:
-- a named visual direction
+- a visual thesis
+- a content plan
+- an interaction thesis
 - explicit tokens or CSS variables
 - realistic states
 - responsive behavior

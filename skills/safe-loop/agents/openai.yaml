@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Loop"
+  short_description: "Keep coding safely to completion"
+  default_prompt: "Use $safe-loop to keep executing an epic continuously with evidence, safe stopping rules, and optional subagent delegation."

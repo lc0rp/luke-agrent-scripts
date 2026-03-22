@@ -35,7 +35,7 @@ Upgrade when:
 
 1. Re-read `SKILL.md` and keep it lean.
 2. Re-verify the source list in `references/sources.md`.
-3. Prefer official and primary sources over summaries.
+3. Prefer the latest official OpenAI frontend guidance over older OpenAI-era material when they overlap.
 4. Add only sources that materially improve outcomes.
 5. Fold repeated advice into one stronger rule.
 6. Move detail into `references/` instead of bloating `SKILL.md`.
@@ -61,6 +61,8 @@ A source should stay only if it meaningfully strengthens at least one of:
 - visual direction
 - design-system discipline
 - screenshot-driven iteration
+- image-led composition and mood-board workflows
+- narrative page structure
 - accessibility and responsive rigor
 - anti-generic taste
 - implementation realism
@@ -83,6 +85,8 @@ Remove sources that duplicate stronger ones.
 The upgraded skill should make these more likely:
 
 - clearer design direction
+- stronger first-view composition
+- better brand or product presence in the first screen
 - less generic layout and styling
 - fewer fake dashboard patterns
 - better responsive behavior
@@ -100,7 +104,9 @@ Test the skill on prompts like:
 
 Check whether the output:
 
+- starts with composition, not components
 - names a direction
+- creates a visual thesis, content plan, and interaction thesis
 - freezes tokens early
 - avoids template AI tropes
 - handles mobile and states
@@ -113,6 +119,7 @@ Check whether the output:
 - Keep references one level deep.
 - Replace stale links.
 - Date major updates at the top of `references/sources.md`.
+- When a new official frontend skill appears from OpenAI, compare its hard rules against ours and merge the stronger guidance.
 
 ## Optional Future Additions
 

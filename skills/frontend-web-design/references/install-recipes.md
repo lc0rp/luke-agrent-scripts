@@ -14,6 +14,8 @@ For React / Next.js style projects, a strong default is:
 - `tailwind-merge`
 - `clsx`
 
+React plus Tailwind remains a strong default for GPT-5.4-era web work because it is fast to iterate and easy to theme consistently.
+
 Typical install flow:
 
 ```bash
@@ -48,9 +50,12 @@ npx playwright install
 
 Then use browser screenshots and critique passes instead of text-only iteration.
 
+When visual accuracy matters, verify multiple breakpoints and check that fixed or floating elements do not overlap key content.
+
 ## AI-Native UI Patterns
 
 If the product includes chat or assistant surfaces, inspect:
+
 - [Vercel AI Elements](https://github.com/vercel/ai-elements)
 - [Prompt Kit](https://github.com/ibelick/prompt-kit)
 
@@ -65,6 +70,7 @@ If none exist, choose one deliberate display/body pairing that fits the product.
 ## When Not To Install More
 
 Do not add a UI stack just to restyle a small screen if the existing project already has:
+
 - stable tokens
 - reusable components
 - acceptable primitives
