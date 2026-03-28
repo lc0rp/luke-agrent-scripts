@@ -273,7 +273,9 @@ def block_render_baseline(block: dict) -> float | None:
 
 def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None:
     for block in page_blocks:
-        if block.get("source") == "native":
+        if block.get("role") == "list_item":
+            block["align"] = "left"
+        elif block.get("source") == "native":
             block["align"] = block_alignment_from_native_lines(block, page_rect)
         render_baseline_y = block_render_baseline(block)
         if render_baseline_y is None:

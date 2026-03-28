@@ -358,6 +358,14 @@ def wrap_paragraph(text: str, width: float, font: fitz.Font, font_size: float) -
     return lines
 
 
+def bullet_advance(font_size: float) -> float:
+    return max(8.0, font_size * 1.05)
+
+
+def bullet_radius(font_size: float) -> float:
+    return max(1.1, font_size * 0.16)
+
+
 def layout_text(text: str, width: float, font: fitz.Font, font_size: float) -> list[str]:
     paragraphs = text.splitlines() or [text]
     lines: list[str] = []
@@ -366,7 +374,14 @@ def layout_text(text: str, width: float, font: fitz.Font, font_size: float) -> l
         if not stripped:
             lines.append("")
             continue
-        if stripped.startswith(("•", "-", "*", "o ")):
+        if stripped.startswith("•"):
+            bullet = stripped[0]
+            content = stripped[1:].strip()
+            wrapped = wrap_paragraph(content, max(20, width - bullet_advance(font_size)), font, font_size)
+            for index, line in enumerate(wrapped):
+                lines.append(f"{bullet} {line}" if index == 0 else f"  {line}")
+            continue
+        if stripped.startswith(("-", "*", "o ")):
             bullet = stripped[0]
             content = stripped[1:].strip()
             wrapped = wrap_paragraph(content, max(20, width - font.text_length(f"{bullet} ", fontsize=font_size)), font, font_size)
@@ -410,17 +425,38 @@ def draw_lines(
     for line in lines:
         if cursor_y > rect.y1:
             break
-        text_width = font.text_length(line, fontsize=font_size)
+        content = line
+        bullet_prefix = False
+        continuation_indent = False
+        if line.startswith("• "):
+            bullet_prefix = True
+            content = line[2:].strip()
+            text_width = bullet_advance(font_size) + font.text_length(content, fontsize=font_size)
+        elif line.startswith("  "):
+            continuation_indent = True
+            content = line.strip()
+            text_width = bullet_advance(font_size) + font.text_length(content, fontsize=font_size)
+        else:
+            text_width = font.text_length(line, fontsize=font_size)
         if align == "center":
             x = rect.x0 + max(0, (rect.width - text_width) / 2)
         elif align == "right":
             x = max(rect.x0, rect.x1 - text_width)
         else:
             x = rect.x0
-        if line.strip():
+        text_x = x
+        if bullet_prefix:
+            radius = bullet_radius(font_size)
+            center_x = x + radius + font_size * 0.14
+            center_y = cursor_y - font_size * 0.31
+            page.draw_circle(fitz.Point(center_x, center_y), radius, color=color, fill=color)
+            text_x = x + bullet_advance(font_size)
+        elif continuation_indent:
+            text_x = x + bullet_advance(font_size)
+        if content.strip():
             page.insert_text(
-                fitz.Point(x, cursor_y),
-                line,
+                fitz.Point(text_x, cursor_y),
+                content,
                 fontname=render_font_name,
                 fontfile=render_font_file,
                 fontsize=font_size,
