@@ -1,0 +1,29 @@
+{
+  "skill_name": "babel-copy",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Translate this branded AML policy PDF into English and keep it looking like the source document. Preserve the ALTIC logo, blue divider rules, footer contact block, numbering, bullets, and overall page layout instead of turning it into a plain text handout.",
+      "expected_output": "A translated PDF that preserves the branded native PDF template while translating the main body text cleanly.",
+      "files": [
+        "/Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy/evals/inputs/F1 - AML Policy.pdf"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Translate this 30-page scanned AML policy PDF into English while preserving the original page images, headers, footers, numbering, and dense compliance sections. The output should stay page-faithful and readable instead of collapsing into OCR junk or a plain rebuilt handout.",
+      "expected_output": "A translated PDF that keeps the scanned template intact, translates repeated footer/header text, and remains readable on dense pages.",
+      "files": [
+        "/Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy/evals/inputs/F2 - AML Policy.pdf"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Translate this amendment PDF into English while preserving the signature page as a structured form. The output should keep the table layout, signature/stamp images, and the original three-page structure.",
+      "expected_output": "A translated PDF that uses structural rebuild for the signature page and preserves signatures and table geometry.",
+      "files": [
+        "/Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy/evals/inputs/F3 - Avenant_SAMA_MONEY.pdf"
+      ]
+    }
+  ]
+}

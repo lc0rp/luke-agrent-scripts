@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babel Copy"
+  short_description: "Rebuild translated PDFs with clean visual fidelity"
+  default_prompt: "Use $babel-copy to extract, translate, rebuild, preserve assets, and export a visually faithful translated PDF."
