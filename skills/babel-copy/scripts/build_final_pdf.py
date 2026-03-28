@@ -219,7 +219,7 @@ def render_overlay_page(
         text = block.get("translated_text") or block.get("text") or ""
         if not str(text).strip():
             continue
-        rect = fitz.Rect(block["bbox"])
+        rect = render_rect_for_block(block, page_blocks, out_page.rect)
         style = block.get("style", {})
         render_font_name, render_font_file = resolve_font_resource(
             source_doc,
@@ -237,6 +237,7 @@ def render_overlay_page(
             render_font_name=render_font_name,
             render_font_file=render_font_file,
             text_color=core.color_int_to_rgb(style.get("color")),
+            baseline_y=float(block["_render_baseline_y"]) if block.get("_render_baseline_y") is not None else None,
         )
         remainder = core.draw_translated_text(out_page, region, str(text))
         if remainder:
@@ -253,8 +254,39 @@ def render_overlay_page(
                 region.align,
                 render_font_name,
                 render_font_file,
+                region.baseline_y,
             )
     return out_doc
+
+
+def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.Rect) -> fitz.Rect:
+    rect = fitz.Rect(block["bbox"])
+    role = str(block.get("role", ""))
+    text = str(block.get("translated_text") or block.get("text") or "")
+    style = block.get("style", {})
+    font_size_hint = float(style.get("font_size_hint", 0) or 0)
+    if (
+        role not in {"heading", "title", "form_label"}
+        or font_size_hint < 12.0
+        or "\n" in text
+        or str(block.get("align", "left")) != "left"
+    ):
+        return rect
+    padding = 36.0
+    next_x0 = page_rect.x1 - padding
+    for other in page_blocks:
+        if other["id"] == block["id"]:
+            continue
+        other_rect = fitz.Rect(other["bbox"])
+        vertical_overlap = min(rect.y1, other_rect.y1) - max(rect.y0, other_rect.y0)
+        if vertical_overlap <= 0:
+            continue
+        if other_rect.x0 <= rect.x0:
+            continue
+        next_x0 = min(next_x0, other_rect.x0 - 6.0)
+    if next_x0 <= rect.x1:
+        return rect
+    return fitz.Rect(rect.x0, rect.y0, round(next_x0, 2), rect.y1)
 
 
 def render_page_via_docx(payload: dict, page_number: int, output_pdf: Path, assets_by_id: dict[str, dict]) -> Path:

@@ -38,7 +38,10 @@ def merge_regions(regions):
         same_align = region.align == current["align"]
         close_y = rect.y0 - current_rect.y1 < max(10, region.font_size_hint * 0.9)
         similar_x = abs(rect.x0 - current_rect.x0) < 18
-        if same_align and close_y and similar_x:
+        current_is_bullet_only = is_bullet_only_text(current["regions"][-1].text)
+        region_is_bullet_only = is_bullet_only_text(region.text)
+        mergeable_direction = not (region_is_bullet_only and not current_is_bullet_only)
+        if same_align and close_y and similar_x and mergeable_direction:
             current["regions"].append(region)
             current["rect"] = current_rect | rect
         else:
@@ -56,6 +59,8 @@ def role_for_text(text: str) -> str:
     if is_probable_artifact(stripped):
         return "artifact"
     if stripped.isupper() and len(stripped) > 4:
+        return "heading"
+    if re_match_lettered_heading(stripped):
         return "heading"
     if stripped.startswith(("o ", "•", "-", "*")):
         return "list_item"
@@ -84,6 +89,12 @@ def re_match_numbered(text: str) -> bool:
     import re
 
     return bool(re.match(r"^[0-9IVX]+\b", text))
+
+
+def re_match_lettered_heading(text: str) -> bool:
+    import re
+
+    return bool(re.match(r"^[A-Za-z]\.\s+\S", text))
 
 
 def groups_from_indices(values: list[int], max_gap: int = 1) -> list[tuple[int, int]]:
@@ -117,11 +128,42 @@ def rect_to_list(rect: fitz.Rect) -> list[float]:
     return [round(rect.x0, 2), round(rect.y0, 2), round(rect.x1, 2), round(rect.y1, 2)]
 
 
+def block_text_from_regions(regions) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(regions):
+        region = regions[index]
+        text = clean_text(region.text)
+        if not text:
+            index += 1
+            continue
+        if is_bullet_only_text(text) and index + 1 < len(regions):
+            next_region = regions[index + 1]
+            next_text = clean_text(next_region.text)
+            same_line = abs(float(region.bbox[1]) - float(next_region.bbox[1])) <= 3.5
+            indented_right = float(next_region.bbox[0]) >= float(region.bbox[2]) - 2.0
+            if next_text and same_line and indented_right:
+                parts.append(f"{text} {next_text}".strip())
+                index += 2
+                continue
+        parts.append(text)
+        index += 1
+    return clean_text("\n".join(parts))
+
+
 def line_payload(region) -> dict:
     return {
         "bbox": rect_to_list(fitz.Rect(region.bbox)),
         "span_styles": [dict(span) for span in region.span_styles],
+        "dominant_font_size": round(float(region.dominant_font_size), 2) if region.dominant_font_size is not None else None,
+        "max_font_size": round(float(region.max_font_size), 2) if region.max_font_size is not None else None,
+        "baseline_y": round(float(region.baseline_y), 2) if region.baseline_y is not None else None,
     }
+
+
+def is_bullet_only_text(text: str) -> bool:
+    compact = clean_text(text).replace(" ", "")
+    return compact in {"•", "-", "*", "o"}
 
 
 def dominant_style_value(native_lines: list[dict], key: str):
@@ -147,6 +189,18 @@ def color_to_hex(value) -> str | None:
 
 
 def block_font_size_hint(block: dict) -> float:
+    native_lines = block.get("_native_lines", [])
+    if native_lines:
+        dominant_sizes = [float(line["dominant_font_size"]) for line in native_lines if line.get("dominant_font_size") is not None]
+        max_sizes = [float(line["max_font_size"]) for line in native_lines if line.get("max_font_size") is not None]
+        role = str(block.get("role", ""))
+        if role in {"heading", "title", "form_label"}:
+            candidates = max_sizes or dominant_sizes
+            if candidates:
+                return round(max(candidates), 2)
+        candidates = dominant_sizes or max_sizes
+        if candidates:
+            return round(median(candidates), 2)
     hints = [float(value) for value in block.get("_font_size_hints", []) if value is not None]
     if hints:
         return round(sum(hints) / len(hints), 2)
@@ -207,10 +261,25 @@ def block_alignment_from_native_lines(block: dict, page_rect: fitz.Rect) -> str:
     return infer_alignment(fitz.Rect(block["bbox"]), page_rect)
 
 
+def block_render_baseline(block: dict) -> float | None:
+    native_lines = block.get("_native_lines", [])
+    if len(native_lines) != 1:
+        return None
+    baseline_y = native_lines[0].get("baseline_y")
+    if baseline_y is None:
+        return None
+    return round(float(baseline_y), 2)
+
+
 def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None:
     for block in page_blocks:
         if block.get("source") == "native":
             block["align"] = block_alignment_from_native_lines(block, page_rect)
+        render_baseline_y = block_render_baseline(block)
+        if render_baseline_y is None:
+            block.pop("_render_baseline_y", None)
+        else:
+            block["_render_baseline_y"] = render_baseline_y
         block["style"] = summarize_block_style(block)
         block.pop("_native_lines", None)
         block.pop("_font_size_hints", None)
@@ -359,6 +428,48 @@ def merge_paragraph_fragments(page_blocks: list[dict]) -> list[dict]:
     return merged
 
 
+def attach_leading_bullets(page_blocks: list[dict]) -> list[dict]:
+    if not page_blocks:
+        return page_blocks
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    merged: list[dict] = []
+    index = 0
+    while index < len(ordered):
+        block = ordered[index]
+        text = str(block.get("text", "")).strip()
+        if is_bullet_only_text(text):
+            candidates = []
+            if merged:
+                candidates.append(merged[-1])
+            if index + 1 < len(ordered):
+                candidates.append(ordered[index + 1])
+            target = None
+            for candidate in candidates:
+                same_line = abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 3.5
+                indented_right = float(candidate["bbox"][0]) >= float(block["bbox"][2]) - 2.0
+                if same_line and indented_right and not candidate.get("table"):
+                    target = candidate
+                    break
+            if target is not None:
+                bullet = clean_text(text) or "•"
+                target_text = clean_text(str(target.get("text", "")))
+                target["text"] = f"{bullet} {target_text}".strip()
+                target["bbox"] = [
+                    round(min(float(block["bbox"][0]), float(target["bbox"][0])), 2),
+                    round(min(float(block["bbox"][1]), float(target["bbox"][1])), 2),
+                    round(max(float(block["bbox"][2]), float(target["bbox"][2])), 2),
+                    round(max(float(block["bbox"][3]), float(target["bbox"][3])), 2),
+                ]
+                target["role"] = "list_item"
+                target.setdefault("_font_size_hints", []).extend(block.get("_font_size_hints", []))
+                target.setdefault("_native_lines", []).extend(block.get("_native_lines", []))
+                index += 1
+                continue
+        merged.append(block)
+        index += 1
+    return merged
+
+
 def should_merge_fragment(previous: dict, current: dict) -> bool:
     if previous.get("table") or current.get("table"):
         return False
@@ -370,6 +481,8 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     previous_text = str(previous.get("text", "")).strip()
     current_text = str(current.get("text", "")).strip()
     if not previous_text or not current_text:
+        return False
+    if is_bullet_only_text(current_text):
         return False
     if previous_text.endswith((".", ":", ";", "!", "?")):
         return False
@@ -726,7 +839,7 @@ def main() -> int:
         markdown_lines.append(f"## Page {page_number}")
         markdown_lines.append("")
         for block_index, block in enumerate(merged, 1):
-            block_text = clean_text("\n".join(region.text for region in block["regions"]))
+            block_text = block_text_from_regions(block["regions"])
             if not block_text:
                 continue
             rect = block["rect"]
@@ -766,6 +879,7 @@ def main() -> int:
         assign_blocks_to_tables(page_blocks, page_tables)
         fill_empty_cells_with_ocr(render_path, page_number, page.rect, page_tables, page_blocks)
         enrich_tall_cells_with_ocr(render_path, page.rect, page_tables, page_blocks)
+        page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_paragraph_fragments(page_blocks)
         mark_margin_artifacts(page_blocks)
         for block in page_blocks:

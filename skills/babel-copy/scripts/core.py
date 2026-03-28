@@ -31,6 +31,9 @@ class TextRegion:
     render_font_name: str = FONT_NAME
     render_font_file: str | None = None
     text_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    dominant_font_size: float | None = None
+    max_font_size: float | None = None
+    baseline_y: float | None = None
 
 
 @dataclass
@@ -101,6 +104,22 @@ def dominant_span_value(span_styles: list[dict[str, object]], key: str):
     return max(weights.items(), key=lambda item: (item[1], str(item[0])))[0]
 
 
+def dominant_weighted_number(
+    values: list[tuple[float, int]],
+    *,
+    precision: int = 2,
+) -> float | None:
+    weights: dict[float, int] = {}
+    for value, weight in values:
+        if weight <= 0:
+            continue
+        rounded = round(float(value), precision)
+        weights[rounded] = weights.get(rounded, 0) + int(weight)
+    if not weights:
+        return None
+    return float(max(weights.items(), key=lambda item: (item[1], item[0]))[0])
+
+
 def color_int_to_rgb(value: int | None) -> tuple[float, float, float]:
     if value is None:
         return (0.0, 0.0, 0.0)
@@ -167,29 +186,48 @@ def extract_native_regions(page: fitz.Page) -> list[TextRegion]:
             rect = fitz.Rect(bbox)
             sizes = [float(span.get("size", 10)) for span in spans]
             span_styles = []
+            size_weights: list[tuple[float, int]] = []
+            baseline_weights: list[tuple[float, int]] = []
             for span in spans:
                 raw_text = str(span.get("text", ""))
                 char_count = non_whitespace_count(raw_text)
                 if char_count <= 0:
                     continue
+                font_size = float(span.get("size", 10) or 10)
+                origin = span.get("origin")
+                baseline_y = None
+                if isinstance(origin, (list, tuple)) and len(origin) >= 2:
+                    try:
+                        baseline_y = float(origin[1])
+                    except (TypeError, ValueError):
+                        baseline_y = None
                 span_styles.append(
                     {
                         "font_name": str(span.get("font") or ""),
                         "flags": int(span.get("flags", 0) or 0),
                         "color": int(span.get("color", 0) or 0),
+                        "font_size": font_size,
                         "char_count": char_count,
                     }
                 )
+                size_weights.append((font_size, char_count))
+                if baseline_y is not None:
+                    baseline_weights.append((baseline_y, char_count))
+            max_font_size = max(sizes) if sizes else rect.height * 0.75
+            dominant_font_size = dominant_weighted_number(size_weights) or max_font_size
             regions.append(
                 TextRegion(
                     bbox=bbox,
                     text=line_text,
                     source="native",
-                    font_size_hint=max(8.0, (sum(sizes) / len(sizes)) if sizes else rect.height * 0.75),
+                    font_size_hint=max(8.0, max(dominant_font_size, max_font_size)),
                     align=infer_alignment(rect, page.rect),
                     span_styles=span_styles,
                     render_font_name=str(dominant_span_value(span_styles, "font_name") or FONT_NAME),
                     text_color=color_int_to_rgb(dominant_span_value(span_styles, "color")),
+                    dominant_font_size=dominant_font_size,
+                    max_font_size=max_font_size,
+                    baseline_y=dominant_weighted_number(baseline_weights),
                 )
             )
     return regions
@@ -358,9 +396,17 @@ def draw_lines(
     align: str,
     render_font_name: str,
     render_font_file: str | None = None,
+    baseline_y: float | None = None,
 ) -> None:
     line_height = font_size * 1.2
-    cursor_y = rect.y0 + font_size
+    descender = getattr(font, "descender", -0.25)
+    fallback_baseline = rect.y1 + float(descender) * font_size
+    if baseline_y is not None:
+        cursor_y = float(baseline_y)
+    elif len(lines) == 1:
+        cursor_y = fallback_baseline
+    else:
+        cursor_y = rect.y0 + font_size
     for line in lines:
         if cursor_y > rect.y1:
             break
@@ -392,11 +438,33 @@ def draw_translated_text(page: fitz.Page, region: TextRegion, translated_text: s
         lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
         if remainder:
             continue
-        draw_lines(page, rect, lines, font, font_size, region.text_color, region.align, region.render_font_name, region.render_font_file)
+        draw_lines(
+            page,
+            rect,
+            lines,
+            font,
+            font_size,
+            region.text_color,
+            region.align,
+            region.render_font_name,
+            region.render_font_file,
+            region.baseline_y,
+        )
         return ""
     font_size = MIN_FONT_SIZE
     lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
-    draw_lines(page, rect, lines, font, font_size, region.text_color, region.align, region.render_font_name, region.render_font_file)
+    draw_lines(
+        page,
+        rect,
+        lines,
+        font,
+        font_size,
+        region.text_color,
+        region.align,
+        region.render_font_name,
+        region.render_font_file,
+        region.baseline_y,
+    )
     return remainder
 
 
