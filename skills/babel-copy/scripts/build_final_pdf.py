@@ -11,6 +11,7 @@ from pathlib import Path
 
 import fitz
 
+from block_overrides import apply_custom_overrides_to_payload
 import core
 
 
@@ -406,7 +407,7 @@ def main() -> int:
     source_pdf = Path(args.source_pdf).expanduser().resolve()
     translated_blocks_json = Path(args.translated_blocks_json).expanduser().resolve()
     output_pdf = Path(args.output_pdf).expanduser().resolve()
-    payload = json.loads(translated_blocks_json.read_text())
+    payload = apply_custom_overrides_to_payload(json.loads(translated_blocks_json.read_text()))
     rendered = render_hybrid_document(source_pdf, payload, output_pdf)
     print(rendered)
     return 0

@@ -12,6 +12,8 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
+from block_overrides import apply_custom_overrides_to_payload
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a DOCX from babel-copy translated blocks")
@@ -145,7 +147,7 @@ def render_table(doc: Document, page: dict, table: dict, blocks_by_id: dict, ass
 
 def main() -> int:
     args = parse_args()
-    payload = json.loads(Path(args.translated_blocks_json).read_text())
+    payload = apply_custom_overrides_to_payload(json.loads(Path(args.translated_blocks_json).read_text()))
     pages = payload.get("pages", [])
     blocks = payload["blocks"]
     assets = payload.get("assets", [])

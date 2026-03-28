@@ -70,7 +70,19 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
     "col_index": 1
   },
   "keep_original": false,
-  "artifact_risk": "low"
+  "artifact_risk": "low",
+  "custom_override": {
+    "bbox": {
+      "x": "+6",
+      "w": "+24"
+    },
+    "align": "left",
+    "style": {
+      "font_size_hint": "+0.8",
+      "color": 1521502,
+      "text_fill_color": "#17375E"
+    }
+  }
 }
 ```
 
@@ -112,6 +124,12 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 - `keep_original: true` is for non-text or non-translatable visual elements, not for repeated boilerplate text.
 - `style.font_name`, `style.flags`, `style.color`, and `style.text_fill_color` are block-level summaries for native text only, not full per-span style runs.
 - OCR-derived blocks should serialize those native-style summary fields as `null`.
+- Post-process tuning should be added to `translated_blocks.json`, not the extracted `blocks.json`.
+- `custom_override` is optional and is applied only at render time.
+- For numeric fields, a string like `"+4"` or `"-1.5"` means a relative delta; a numeric literal means absolute replacement.
+- `custom_override.bbox.x` / `y` shift the whole block, while `w` / `h` grow or shrink its width or height.
+- `custom_override.bbox.x0` / `y0` / `x1` / `y1` can override or delta individual edges directly.
+- Overlay pages honor bbox nudges, font-size changes, alignment overrides, color overrides, and text changes. DOCX rebuild pages honor text/style/alignment overrides, but not absolute PDF positioning with the same fidelity.
 
 ## Keep Original
 
