@@ -476,7 +476,7 @@ def merge_paragraph_fragments(page_blocks: list[dict]) -> list[dict]:
                 round(max(previous["bbox"][2], block["bbox"][2]), 2),
                 round(max(previous["bbox"][3], block["bbox"][3]), 2),
             ]
-            previous["role"] = "paragraph"
+            previous["role"] = role_for_text(previous["text"])
             previous["style"]["bold"] = False
             previous.setdefault("_font_size_hints", []).extend(block.get("_font_size_hints", []))
             previous.setdefault("_native_lines", []).extend(block.get("_native_lines", []))
@@ -570,6 +570,145 @@ def mark_two_column_rows(page_blocks: list[dict]) -> None:
             continue
         for block in peers:
             block["_force_left_align"] = True
+
+
+def block_visual_x0(block: dict) -> float:
+    wide_native_lines = [
+        float(line["bbox"][0])
+        for line in block.get("_native_lines", [])
+        if float(line["bbox"][2]) - float(line["bbox"][0]) >= 14.0
+    ]
+    if wide_native_lines:
+        return min(wide_native_lines)
+    return float(block["bbox"][0])
+
+
+def block_visual_x1(block: dict) -> float:
+    wide_native_lines = [
+        float(line["bbox"][2])
+        for line in block.get("_native_lines", [])
+        if float(line["bbox"][2]) - float(line["bbox"][0]) >= 14.0
+    ]
+    if wide_native_lines:
+        return max(wide_native_lines)
+    return float(block["bbox"][2])
+
+
+def inline_merge_text(blocks: list[dict]) -> str:
+    marker = None
+    parts: list[str] = []
+    for block in blocks:
+        text = clean_text(str(block.get("text", "")))
+        if not text:
+            continue
+        part_marker, remainder = split_leading_marker(text)
+        if part_marker and marker is None:
+            marker = part_marker
+        payload = remainder if part_marker else text
+        payload = payload.strip()
+        if payload:
+            parts.append(payload)
+    merged = clean_text(" ".join(parts))
+    if marker:
+        return clean_text(f"{marker} {merged}".strip())
+    return merged
+
+
+def can_merge_inline_block(block: dict) -> bool:
+    if block.get("table"):
+        return False
+    if block.get("role") in {"header", "footer"}:
+        return False
+    text = clean_text(str(block.get("text", "")))
+    if not text:
+        return False
+    if block.get("keep_original"):
+        return text in {":", ";", ","}
+    return True
+
+
+def should_merge_inline_sequence(blocks: list[dict]) -> bool:
+    if len(blocks) < 2:
+        return False
+    texts = [clean_text(str(block.get("text", ""))) for block in blocks]
+    marker_count = sum(1 for text in texts if split_leading_marker(text)[0])
+    punctuation_count = sum(1 for text in texts if clean_text(text) in {":", ";", ","})
+    word_like_count = sum(1 for text in texts if any(ch.isalnum() for ch in text))
+    return marker_count > 0 or punctuation_count > 0 or word_like_count >= 3
+
+
+def merge_inline_sequence(blocks: list[dict]) -> dict:
+    merged = dict(blocks[0])
+    merged["text"] = inline_merge_text(blocks)
+    merged["bbox"] = [
+        round(min(float(block["bbox"][0]) for block in blocks), 2),
+        round(min(float(block["bbox"][1]) for block in blocks), 2),
+        round(max(float(block["bbox"][2]) for block in blocks), 2),
+        round(max(float(block["bbox"][3]) for block in blocks), 2),
+    ]
+    merged["role"] = role_for_text(merged["text"])
+    merged["keep_original"] = False
+    merged["_font_size_hints"] = [float(value) for block in blocks for value in block.get("_font_size_hints", [])]
+    merged["_native_lines"] = [line for block in blocks for line in block.get("_native_lines", [])]
+    merged["style"] = dict(merged.get("style", {}))
+    merged["style"]["bold"] = any(bool(block.get("style", {}).get("bold")) for block in blocks)
+    return merged
+
+
+def merge_inline_row_fragments(page_blocks: list[dict]) -> list[dict]:
+    if not page_blocks:
+        return page_blocks
+    ordered = sorted(
+        page_blocks,
+        key=lambda item: (round(float(item["bbox"][1]), 2), block_visual_x0(item), float(item["bbox"][0])),
+    )
+    merged_rows: list[dict] = []
+    row: list[dict] = []
+    row_y = None
+
+    def flush_row(items: list[dict]) -> None:
+        if not items:
+            return
+        visual_order = sorted(items, key=lambda item: (block_visual_x0(item), float(item["bbox"][0]), float(item["bbox"][2])))
+        index = 0
+        while index < len(visual_order):
+            current = visual_order[index]
+            if not can_merge_inline_block(current):
+                merged_rows.append(current)
+                index += 1
+                continue
+            sequence = [current]
+            prev_visual_x1 = block_visual_x1(current)
+            lookahead = index + 1
+            while lookahead < len(visual_order):
+                candidate = visual_order[lookahead]
+                if not can_merge_inline_block(candidate):
+                    break
+                gap = block_visual_x0(candidate) - prev_visual_x1
+                if gap < -3.0 or gap > 24.0:
+                    break
+                sequence.append(candidate)
+                prev_visual_x1 = block_visual_x1(candidate)
+                lookahead += 1
+            if should_merge_inline_sequence(sequence):
+                merged_rows.append(merge_inline_sequence(sequence))
+            else:
+                merged_rows.extend(sequence)
+            index = lookahead
+
+    for block in ordered:
+        block_y = float(block["bbox"][1])
+        if row and row_y is not None and abs(block_y - row_y) > 2.5:
+            flush_row(row)
+            row = []
+            row_y = None
+        row.append(block)
+        if row_y is None:
+            row_y = block_y
+        else:
+            row_y = min(row_y, block_y)
+    flush_row(row)
+    return merged_rows
 
 
 def should_merge_fragment(previous: dict, current: dict) -> bool:
@@ -988,6 +1127,7 @@ def main() -> int:
         fill_empty_cells_with_ocr(render_path, page_number, page.rect, page_tables, page_blocks)
         enrich_tall_cells_with_ocr(render_path, page.rect, page_tables, page_blocks)
         page_blocks = attach_leading_bullets(page_blocks)
+        page_blocks = merge_inline_row_fragments(page_blocks)
         page_blocks = merge_paragraph_fragments(page_blocks)
         mark_margin_artifacts(page_blocks)
         mark_list_items_from_marker_artifacts(page_blocks)
