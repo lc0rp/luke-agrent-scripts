@@ -83,7 +83,7 @@ def resolve_font_resource(
 
 
 def choose_page_mode(page: dict, assets_by_id: dict[str, dict]) -> str:
-    if page.get("tables"):
+    if page.get("tables") and str(page.get("page_type", "")) != "scanned":
         return "docx_rebuild"
     for asset_id in page.get("asset_ids", []):
         asset = assets_by_id.get(asset_id)
@@ -242,21 +242,9 @@ def render_overlay_page(
         )
         remainder = core.draw_translated_text(out_page, region, str(text))
         if remainder:
-            # Fall back to a tighter fit rather than spilling into a new page for template pages.
-            font, safe_font_name, safe_font_file = core.resolve_render_font(region, str(text))
-            lines = core.layout_text(str(text), max(20, rect.width - 2), font, max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0))
-            core.draw_lines(
-                out_page,
-                rect,
-                lines,
-                font,
-                max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0),
-                region.text_color,
-                region.align,
-                safe_font_name,
-                safe_font_file,
-                region.baseline_y,
-            )
+            # The core renderer already drew the block once at minimum size. Avoid a second draw pass,
+            # which creates partially overlaid duplicate text on dense OCR pages.
+            continue
     return out_doc
 
 
@@ -301,6 +289,30 @@ def content_rect_for_block(block: dict, page_blocks: list[dict]) -> fitz.Rect:
     return rect
 
 
+def ocr_redaction_padding(block: dict) -> tuple[float, float, float, float]:
+    if not str(block.get("source", "")).startswith("ocr"):
+        return (0.0, 0.0, 0.0, 0.0)
+    rect = fitz.Rect(block["bbox"])
+    text = str(block.get("translated_text") or block.get("text") or "")
+    role = str(block.get("role", ""))
+    line_count = max(1, len([line for line in text.splitlines() if line.strip()]))
+    font_size_hint = float(block.get("style", {}).get("font_size_hint", 8.0) or 8.0)
+    expected_height = max(font_size_hint * 1.25, line_count * font_size_hint * 1.05)
+    looks_tight = rect.height <= expected_height + 1.5
+    x_pad = max(3.0, min(8.0, font_size_hint * 0.55 + (1.0 if looks_tight else 0.4)))
+    y_pad = max(1.8, min(5.5, font_size_hint * 0.42 + (1.2 if looks_tight else 0.5)))
+    bottom_pad = min(6.5, y_pad + (1.2 if line_count == 1 else 1.8))
+    if role in {"paragraph", "list_item", "table_cell"}:
+        x_pad = max(x_pad, 5.5)
+        y_pad = max(y_pad, 4.8 if line_count == 1 else 5.5)
+        bottom_pad = max(bottom_pad, 6.0 if line_count == 1 else 6.8)
+    elif role in {"heading", "title", "header", "footer"}:
+        x_pad = max(x_pad, 3.8)
+        y_pad = max(y_pad, 2.8)
+        bottom_pad = max(bottom_pad, 4.2)
+    return (x_pad, y_pad, x_pad, bottom_pad)
+
+
 def redaction_rect_for_block(block: dict, page_blocks: list[dict]) -> fitz.Rect:
     rect = fitz.Rect(block["bbox"])
     marker = leading_marker_artifact(block, page_blocks)
@@ -308,8 +320,11 @@ def redaction_rect_for_block(block: dict, page_blocks: list[dict]) -> fitz.Rect:
         marker_rect = fitz.Rect(marker["bbox"])
         rect = fitz.Rect(max(rect.x0, marker_rect.x1 + 1.0), rect.y0, rect.x1, rect.y1)
     role = str(block.get("role", ""))
-    if role in {"footer", "header"}:
+    if role in {"footer", "header"} and not str(block.get("source", "")).startswith("ocr"):
         return fitz.Rect(rect.x0, rect.y0 + 1.5, rect.x1, max(rect.y0 + 2.0, rect.y1 - 0.5))
+    left_pad, top_pad, right_pad, bottom_pad = ocr_redaction_padding(block)
+    if left_pad or top_pad or right_pad or bottom_pad:
+        rect = fitz.Rect(rect.x0 - left_pad, rect.y0 - top_pad, rect.x1 + right_pad, rect.y1 + bottom_pad)
     return rect
 
 

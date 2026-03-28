@@ -325,10 +325,114 @@ def block_render_baseline(block: dict) -> float | None:
     return round(float(baseline_y), 2)
 
 
+def normalized_words(text: str) -> list[str]:
+    return re.findall(r"[A-Za-zÀ-ÿ0-9]+", clean_text(text).lower())
+
+
+def suffix_prefix_word_overlap(left: str, right: str, max_words: int = 6) -> int:
+    left_words = normalized_words(left)
+    right_words = normalized_words(right)
+    limit = min(max_words, len(left_words), len(right_words))
+    for size in range(limit, 1, -1):
+        if left_words[-size:] == right_words[:size]:
+            return size
+    return 0
+
+
+def trim_duplicate_prefix(current_text: str, previous_text: str) -> str:
+    overlap = suffix_prefix_word_overlap(previous_text, current_text)
+    if overlap <= 1:
+        return current_text
+    current_words = clean_text(current_text).split()
+    if overlap >= len(current_words):
+        return current_text
+    trimmed = " ".join(current_words[overlap:]).strip()
+    return trimmed or current_text
+
+
+def block_line_count(block: dict) -> int:
+    return max(1, len([line for line in str(block.get("text", "")).splitlines() if line.strip()]))
+
+
+def block_is_ocr(block: dict) -> bool:
+    return str(block.get("source", "")).startswith("ocr")
+
+
+def block_looks_like_toc_entry(block: dict) -> bool:
+    text = clean_text(str(block.get("text", "")))
+    if not text:
+        return False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    matched = 0
+    for line in lines:
+        has_page_no = bool(re.search(r"(?:\.{2,}\s*|\s)\d{1,3}$", line))
+        numbered = bool(re.match(r"^(?:\d+(?:\.\d+)*|[A-Za-z]\.)\b", line))
+        if has_page_no and numbered:
+            matched += 1
+    return matched >= 1 and matched >= max(1, len(lines) // 2)
+
+
+def page_has_toc_title(page_blocks: list[dict]) -> bool:
+    toc_titles = {"table des matières", "table of contents"}
+    for block in page_blocks:
+        if clean_text(str(block.get("text", ""))).strip().lower() in toc_titles:
+            return True
+    return False
+
+
+def block_alignment_from_ocr_layout(block: dict, page_blocks: list[dict], page_rect: fitz.Rect, toc_page: bool) -> str:
+    rect = fitz.Rect(block["bbox"])
+    role = str(block.get("role", ""))
+    text = clean_text(str(block.get("text", "")))
+    line_count = block_line_count(block)
+    text_length = len(text)
+
+    if block.get("table") or role == "table_cell":
+        return "left"
+    if "|" in text:
+        return "left"
+    if role == "list_item":
+        return "left"
+    if toc_page and block_looks_like_toc_entry(block):
+        return "left"
+    if role in {"header", "footer"}:
+        return infer_alignment(rect, page_rect)
+
+    centered = abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    narrow = rect.width < page_rect.width * 0.55
+
+    if role in {"heading", "title", "form_label"}:
+        if toc_page:
+            return "left"
+        if centered and narrow and line_count <= 2:
+            return "center"
+        if rect.x1 > page_rect.width * 0.85 and rect.width < page_rect.width * 0.4:
+            return "right"
+        return "left"
+
+    if role == "paragraph":
+        if centered and narrow and line_count == 1 and text_length <= 28:
+            return "center"
+        if rect.x1 > page_rect.width * 0.85 and rect.width < page_rect.width * 0.4:
+            return "right"
+        if line_count >= 2:
+            return "left"
+        if rect.width >= page_rect.width * 0.32 and text_length >= 36:
+            return "left"
+        return "left"
+
+    return infer_alignment(rect, page_rect)
+
+
 def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None:
+    toc_page = page_has_toc_title(page_blocks)
     for block in page_blocks:
         if block.get("_force_left_align") or block.get("role") == "list_item":
             block["align"] = "left"
+        elif block_is_ocr(block):
+            block["align"] = block_alignment_from_ocr_layout(block, page_blocks, page_rect, toc_page)
         elif block.get("source") == "native":
             block["align"] = block_alignment_from_native_lines(block, page_rect)
         render_baseline_y = block_render_baseline(block)
@@ -381,53 +485,92 @@ def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
     dark = array < 190
     height, width = array.shape
 
-    column_counts = dark.sum(axis=0)
-    vertical_indices = [idx for idx, count in enumerate(column_counts) if count >= max(180, int(height * 0.2))]
+    def longest_dark_runs(mask: np.ndarray, axis: int) -> np.ndarray:
+        if axis == 0:
+            runs = np.zeros(mask.shape[1], dtype=int)
+            for column in range(mask.shape[1]):
+                current = best = 0
+                for value in mask[:, column]:
+                    if value:
+                        current += 1
+                        if current > best:
+                            best = current
+                    else:
+                        current = 0
+                runs[column] = best
+            return runs
+        runs = np.zeros(mask.shape[0], dtype=int)
+        for row in range(mask.shape[0]):
+            current = best = 0
+            for value in mask[row, :]:
+                if value:
+                    current += 1
+                    if current > best:
+                        best = current
+                else:
+                    current = 0
+            runs[row] = best
+        return runs
+
+    vertical_runs = longest_dark_runs(dark, axis=0)
+    vertical_threshold = max(42, int(height * 0.06))
+    vertical_indices = [idx for idx, run in enumerate(vertical_runs) if run >= vertical_threshold]
     vertical_groups = groups_from_indices(vertical_indices, max_gap=2)
     if len(vertical_groups) < 3:
         return []
 
-    horizontal_counts = dark.sum(axis=1)
-    table_candidates: list[dict] = []
+    centers = [(group[0] + group[1]) / 2 for group in vertical_groups]
+    clusters: list[list[tuple[int, int]]] = []
+    current_cluster: list[tuple[int, int]] = []
+    for index, group in enumerate(vertical_groups):
+        if not current_cluster:
+            current_cluster.append(group)
+            continue
+        prev_center = centers[index - 1]
+        center = centers[index]
+        if center - prev_center <= width * 0.22:
+            current_cluster.append(group)
+            continue
+        if len(current_cluster) >= 3:
+            clusters.append(current_cluster)
+        current_cluster = [group]
+    if len(current_cluster) >= 3:
+        clusters.append(current_cluster)
 
-    for start in range(0, len(vertical_groups) - 2):
-        trio = vertical_groups[start : start + 3]
-        left = (trio[0][0] + trio[0][1]) / 2
-        divider = (trio[1][0] + trio[1][1]) / 2
-        right = (trio[2][0] + trio[2][1]) / 2
-        if divider - left < width * 0.15 or right - divider < width * 0.15:
+    table_candidates: list[dict] = []
+    for cluster in clusters:
+        columns_px = [(group[0] + group[1]) / 2 for group in cluster]
+        if len(columns_px) < 3:
             continue
-        x0 = max(0, int(round(left + 2)))
-        x1 = min(width, int(round(right - 2)))
-        if x1 - x0 < width * 0.35:
+        x0 = max(0, int(round(columns_px[0] + 1)))
+        x1 = min(width, int(round(columns_px[-1] - 1)))
+        if x1 - x0 < width * 0.22:
             continue
-        sub_counts = dark[:, x0:x1].sum(axis=1)
-        horizontal_indices = [idx for idx, count in enumerate(sub_counts) if count >= max(400, int((x1 - x0) * 0.72))]
+        sub_dark = dark[:, x0:x1]
+        horizontal_runs = longest_dark_runs(sub_dark, axis=1)
+        horizontal_threshold = max(54, int((x1 - x0) * 0.45))
+        horizontal_indices = [idx for idx, run in enumerate(horizontal_runs) if run >= horizontal_threshold]
         horizontal_groups = groups_from_indices(horizontal_indices, max_gap=2)
-        if len(horizontal_groups) < 4:
+        if len(horizontal_groups) < 3:
             continue
-        row_positions = [(group[0] + group[1]) / 2 for group in horizontal_groups]
+        rows_px = [(group[0] + group[1]) / 2 for group in horizontal_groups]
+        if len(columns_px) > 10 or len(rows_px) > 12:
+            continue
         table_candidates.append(
             {
-                "left": left,
-                "divider": divider,
-                "right": right,
-                "rows": row_positions,
-                "score": len(row_positions),
+                "columns": columns_px,
+                "rows": rows_px,
+                "bbox": [columns_px[0], rows_px[0], columns_px[-1], rows_px[-1]],
+                "score": (len(columns_px) - 1) * (len(rows_px) - 1),
             }
         )
 
     if not table_candidates:
         return []
 
-    best = max(table_candidates, key=lambda item: (item["score"], item["right"] - item["left"]))
-    row_positions = best["rows"]
-    columns_px = [best["left"], best["divider"], best["right"]]
-    rows_px = row_positions
-    if len(rows_px) < 4:
-        return []
-    columns_pt = [round(page_px_to_pt(value, width, page_rect.width), 2) for value in columns_px]
-    rows_pt = [round(page_px_to_pt(value, height, page_rect.height), 2) for value in rows_px]
+    best = max(table_candidates, key=lambda item: (item["score"], item["bbox"][2] - item["bbox"][0]))
+    columns_pt = [round(page_px_to_pt(value, width, page_rect.width), 2) for value in best["columns"]]
+    rows_pt = [round(page_px_to_pt(value, height, page_rect.height), 2) for value in best["rows"]]
     return [
         {
             "id": "table-1",
@@ -570,6 +713,73 @@ def mark_two_column_rows(page_blocks: list[dict]) -> None:
             continue
         for block in peers:
             block["_force_left_align"] = True
+
+
+def mark_textual_table_like_rows(page_blocks: list[dict]) -> None:
+    table_like_blocks = [block for block in page_blocks if block_is_ocr(block) and "|" in str(block.get("text", ""))]
+    if len(table_like_blocks) < 2:
+        return
+    for block in table_like_blocks:
+        block["role"] = "table_cell"
+        block["_force_left_align"] = True
+
+
+def block_x_overlap_ratio(left: dict, right: dict) -> float:
+    left_rect = fitz.Rect(left["bbox"])
+    right_rect = fitz.Rect(right["bbox"])
+    overlap = min(left_rect.x1, right_rect.x1) - max(left_rect.x0, right_rect.x0)
+    if overlap <= 0:
+        return 0.0
+    return overlap / max(1.0, min(left_rect.width, right_rect.width))
+
+
+def build_textual_tables(page_number: int, page_blocks: list[dict]) -> list[dict]:
+    candidates = [
+        block
+        for block in sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+        if block_is_ocr(block) and (block.get("role") == "table_cell" or "|" in str(block.get("text", "")))
+    ]
+    if len(candidates) < 2:
+        return []
+
+    clusters: list[list[dict]] = []
+    current_cluster: list[dict] = []
+    for block in candidates:
+        if not current_cluster:
+            current_cluster = [block]
+            continue
+        previous = current_cluster[-1]
+        gap = float(block["bbox"][1]) - float(previous["bbox"][3])
+        if gap <= 36.0 and block_x_overlap_ratio(previous, block) >= 0.45:
+            current_cluster.append(block)
+            continue
+        if len(current_cluster) >= 2:
+            clusters.append(current_cluster)
+        current_cluster = [block]
+    if len(current_cluster) >= 2:
+        clusters.append(current_cluster)
+
+    tables: list[dict] = []
+    for index, cluster in enumerate(clusters, 1):
+        cluster = sorted(cluster, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+        x0 = round(min(float(block["bbox"][0]) for block in cluster), 2)
+        x1 = round(max(float(block["bbox"][2]) for block in cluster), 2)
+        if x1 - x0 < 140:
+            continue
+        row_edges = [round(float(cluster[0]["bbox"][1]), 2)]
+        for previous, current in zip(cluster, cluster[1:]):
+            boundary = (float(previous["bbox"][3]) + float(current["bbox"][1])) / 2
+            row_edges.append(round(boundary, 2))
+        row_edges.append(round(float(cluster[-1]["bbox"][3]), 2))
+        tables.append(
+            {
+                "id": f"text-table-{index}",
+                "bbox": [x0, row_edges[0], x1, row_edges[-1]],
+                "columns": [x0, x1],
+                "rows": row_edges,
+            }
+        )
+    return tables
 
 
 def block_visual_x0(block: dict) -> float:
@@ -727,6 +937,28 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     current_style = block_native_style_signature(current)
     if previous_style is not None and current_style is not None and previous_style != current_style:
         return False
+    if block_is_ocr(previous) and block_is_ocr(current):
+        previous_rect = fitz.Rect(previous["bbox"])
+        current_rect = fitz.Rect(current["bbox"])
+        if (
+            ("|" in previous_text or previous.get("role") == "table_cell")
+            and gap <= 16
+            and current_rect.x0 >= previous_rect.x0 + 12
+            and current_rect.x1 <= previous_rect.x1 + 10
+        ):
+            return True
+        if (
+            str(previous.get("role")) == "paragraph"
+            and str(current.get("role")) == "paragraph"
+            and gap <= 12
+            and (abs(current_rect.x0 - previous_rect.x0) <= 10 or (current_rect.x0 >= previous_rect.x0 + 18 and current_rect.x1 <= previous_rect.x1 + 6))
+        ):
+            if previous_text[-1:].isalnum() and current_text[:1].islower():
+                return True
+            if "|" in previous_text or "|" in current_text:
+                return True
+            if previous_rect.width >= current_rect.width * 1.25 and len(current_text) <= 96:
+                return True
     if abs(float(current["bbox"][0]) - float(previous["bbox"][0])) > 24:
         return False
     if is_bullet_only_text(current_text):
@@ -740,6 +972,40 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     if len(current_text) <= 32 and (current_text.isupper() or " " not in current_text):
         return True
     return False
+
+
+def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
+    if not page_blocks:
+        return page_blocks
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    deduped: list[dict] = []
+    for block in ordered:
+        current_text = clean_text(str(block.get("text", "")))
+        if not current_text:
+            continue
+        if not deduped:
+            deduped.append(block)
+            continue
+        previous = deduped[-1]
+        previous_text = clean_text(str(previous.get("text", "")))
+        if not previous_text:
+            deduped.append(block)
+            continue
+        if not (block_is_ocr(previous) and block_is_ocr(block)):
+            deduped.append(block)
+            continue
+        previous_rect = fitz.Rect(previous["bbox"])
+        current_rect = fitz.Rect(block["bbox"])
+        same_lane = abs(current_rect.y0 - previous_rect.y0) <= 4.0 or abs(current_rect.x0 - previous_rect.x0) <= 10.0
+        if same_lane:
+            if normalized_words(previous_text) == normalized_words(current_text):
+                continue
+            trimmed = trim_duplicate_prefix(current_text, previous_text)
+            if trimmed != current_text:
+                block["text"] = trimmed
+                current_text = trimmed
+        deduped.append(block)
+    return deduped
 
 
 def mark_margin_artifacts(page_blocks: list[dict]) -> None:
@@ -1129,6 +1395,16 @@ def main() -> int:
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
         page_blocks = merge_paragraph_fragments(page_blocks)
+        page_blocks = dedupe_ocr_blocks(page_blocks)
+        mark_textual_table_like_rows(page_blocks)
+        textual_tables = build_textual_tables(page_number, page_blocks)
+        for table in textual_tables:
+            table["id"] = f"p{page_number}-{table['id']}"
+            table["page_number"] = page_number
+            table["cells"] = build_table_cells(page_number, table)
+        if textual_tables:
+            page_tables.extend(textual_tables)
+            assign_blocks_to_tables(page_blocks, textual_tables)
         mark_margin_artifacts(page_blocks)
         mark_list_items_from_marker_artifacts(page_blocks)
         mark_two_column_rows(page_blocks)
@@ -1158,7 +1434,7 @@ def main() -> int:
                 "page_number": page_number,
                 "page_type": page_type,
                 "region_source": region_source,
-                "strategy_hint": "rebuild" if page_tables or signature_assets else "overlay",
+                "strategy_hint": "rebuild" if ((page_tables and page_type != "scanned") or signature_assets) else "overlay",
                 "width": round(page.rect.width, 2),
                 "height": round(page.rect.height, 2),
                 "render_path": str(render_path),
