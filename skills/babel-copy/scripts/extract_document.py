@@ -13,7 +13,14 @@ import numpy as np
 import pytesseract
 from PIL import Image
 
-from core import classify_page, clean_text, extract_native_regions, extract_ocr_regions, infer_alignment, parse_page_selection
+from core import classify_page, clean_text, extract_native_regions, extract_ocr_regions, infer_alignment, parse_page_selection, split_leading_marker
+
+
+def region_style_signature(region) -> tuple[str, tuple[float, float, float]]:
+    return (
+        str(getattr(region, "render_font_name", "") or ""),
+        tuple(round(float(value), 3) for value in getattr(region, "text_color", (0.0, 0.0, 0.0))),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,21 +39,38 @@ def merge_regions(regions):
     for region in regions:
         rect = fitz.Rect(region.bbox)
         if current is None:
-            current = {"regions": [region], "rect": rect, "align": region.align, "source": region.source}
+            current = {
+                "regions": [region],
+                "rect": rect,
+                "align": region.align,
+                "source": region.source,
+                "style_signature": region_style_signature(region),
+            }
             continue
         current_rect = current["rect"]
         same_align = region.align == current["align"]
         close_y = rect.y0 - current_rect.y1 < max(10, region.font_size_hint * 0.9)
         similar_x = abs(rect.x0 - current_rect.x0) < 18
+        similar_style = (
+            region.source != "native"
+            or current["source"] != "native"
+            or region_style_signature(region) == current["style_signature"]
+        )
         current_is_bullet_only = is_bullet_only_text(current["regions"][-1].text)
         region_is_bullet_only = is_bullet_only_text(region.text)
         mergeable_direction = not (region_is_bullet_only and not current_is_bullet_only)
-        if same_align and close_y and similar_x and mergeable_direction:
+        if same_align and close_y and similar_x and similar_style and mergeable_direction:
             current["regions"].append(region)
             current["rect"] = current_rect | rect
         else:
             blocks.append(current)
-            current = {"regions": [region], "rect": rect, "align": region.align, "source": region.source}
+            current = {
+                "regions": [region],
+                "rect": rect,
+                "align": region.align,
+                "source": region.source,
+                "style_signature": region_style_signature(region),
+            }
     if current is not None:
         blocks.append(current)
     return blocks
@@ -62,7 +86,8 @@ def role_for_text(text: str) -> str:
         return "heading"
     if re_match_lettered_heading(stripped):
         return "heading"
-    if stripped.startswith(("o ", "•", "-", "*")):
+    marker, _ = split_leading_marker(stripped)
+    if marker in {"o", "O", "•", "-", "*"}:
         return "list_item"
     if re_match_numbered(stripped):
         return "heading"
@@ -166,6 +191,15 @@ def is_bullet_only_text(text: str) -> bool:
     return compact in {"•", "-", "*", "o"}
 
 
+def is_marker_artifact_text(text: str) -> bool:
+    compact = clean_text(text).replace(" ", "")
+    if not compact:
+        return False
+    if "•" in compact:
+        return True
+    return len(compact) <= 3 and all(not ch.isalnum() for ch in compact)
+
+
 def dominant_style_value(native_lines: list[dict], key: str):
     weights: dict[object, int] = defaultdict(int)
     for line in native_lines:
@@ -180,6 +214,17 @@ def dominant_style_value(native_lines: list[dict], key: str):
     if not weights:
         return None
     return max(weights.items(), key=lambda item: (item[1], str(item[0])))[0]
+
+
+def block_native_style_signature(block: dict) -> tuple[object, object, object] | None:
+    native_lines = block.get("_native_lines", [])
+    if not native_lines:
+        return None
+    return (
+        dominant_style_value(native_lines, "font_name"),
+        dominant_style_value(native_lines, "flags"),
+        dominant_style_value(native_lines, "color"),
+    )
 
 
 def color_to_hex(value) -> str | None:
@@ -227,7 +272,16 @@ def summarize_block_style(block: dict) -> dict:
 def block_alignment_from_native_lines(block: dict, page_rect: fitz.Rect) -> str:
     native_lines = block.get("_native_lines", [])
     if len(native_lines) < 2:
-        return infer_alignment(fitz.Rect(block["bbox"]), page_rect)
+        rect = fitz.Rect(block["bbox"])
+        role = str(block.get("role", ""))
+        if (
+            role == "paragraph"
+            and rect.x0 <= page_rect.width * 0.16
+            and rect.x1 >= page_rect.width * 0.72
+            and rect.width >= page_rect.width * 0.55
+        ):
+            return "left"
+        return infer_alignment(rect, page_rect)
 
     x0s = [float(line["bbox"][0]) for line in native_lines]
     x1s = [float(line["bbox"][2]) for line in native_lines]
@@ -273,7 +327,7 @@ def block_render_baseline(block: dict) -> float | None:
 
 def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None:
     for block in page_blocks:
-        if block.get("role") == "list_item":
+        if block.get("_force_left_align") or block.get("role") == "list_item":
             block["align"] = "left"
         elif block.get("source") == "native":
             block["align"] = block_alignment_from_native_lines(block, page_rect)
@@ -283,6 +337,7 @@ def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None
         else:
             block["_render_baseline_y"] = render_baseline_y
         block["style"] = summarize_block_style(block)
+        block.pop("_force_left_align", None)
         block.pop("_native_lines", None)
         block.pop("_font_size_hints", None)
 
@@ -472,6 +527,51 @@ def attach_leading_bullets(page_blocks: list[dict]) -> list[dict]:
     return merged
 
 
+def mark_list_items_from_marker_artifacts(page_blocks: list[dict]) -> None:
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    for index, block in enumerate(ordered):
+        if block.get("role") != "artifact":
+            continue
+        if not is_marker_artifact_text(str(block.get("text", ""))):
+            continue
+        for candidate in ordered[index + 1 :]:
+            same_line = abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 4.0
+            if not same_line:
+                if float(candidate["bbox"][1]) > float(block["bbox"][3]) + 6.0:
+                    break
+                continue
+            if candidate.get("role") == "artifact" or candidate.get("table"):
+                continue
+            if float(candidate["bbox"][0]) < float(block["bbox"][2]) - 2.0:
+                continue
+            candidate["role"] = "list_item"
+            break
+
+
+def mark_two_column_rows(page_blocks: list[dict]) -> None:
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    for index, left in enumerate(ordered):
+        if left.get("role") == "artifact" or left.get("table"):
+            continue
+        peers = [left]
+        for right in ordered[index + 1 :]:
+            same_line = abs(float(left["bbox"][1]) - float(right["bbox"][1])) <= 2.5
+            if not same_line:
+                if float(right["bbox"][1]) > float(left["bbox"][3]) + 4.0:
+                    break
+                continue
+            if right.get("role") == "artifact" or right.get("table"):
+                continue
+            gap = float(right["bbox"][0]) - float(peers[-1]["bbox"][2])
+            if gap < 10:
+                continue
+            peers.append(right)
+        if len(peers) < 2:
+            continue
+        for block in peers:
+            block["_force_left_align"] = True
+
+
 def should_merge_fragment(previous: dict, current: dict) -> bool:
     if previous.get("table") or current.get("table"):
         return False
@@ -483,6 +583,12 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     previous_text = str(previous.get("text", "")).strip()
     current_text = str(current.get("text", "")).strip()
     if not previous_text or not current_text:
+        return False
+    previous_style = block_native_style_signature(previous)
+    current_style = block_native_style_signature(current)
+    if previous_style is not None and current_style is not None and previous_style != current_style:
+        return False
+    if abs(float(current["bbox"][0]) - float(previous["bbox"][0])) > 24:
         return False
     if is_bullet_only_text(current_text):
         return False
@@ -884,6 +990,8 @@ def main() -> int:
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_paragraph_fragments(page_blocks)
         mark_margin_artifacts(page_blocks)
+        mark_list_items_from_marker_artifacts(page_blocks)
+        mark_two_column_rows(page_blocks)
         for block in page_blocks:
             if block.get("keep_original"):
                 continue

@@ -18,6 +18,7 @@ MIN_FONT_SIZE = 6.5
 FONT_NAME = "helv"
 DEFAULT_OCR_LANG = "eng"
 DEFAULT_OCR_PSM = "4"
+_GLYPH_SUPPORT_CACHE: dict[tuple[str, str, int], bool] = {}
 
 
 @dataclass
@@ -83,12 +84,56 @@ def clean_text(text: str) -> str:
     text = text.replace("\u00a0", " ")
     text = text.replace("\uf0b7", "•")
     text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"(?m)^([oO])(?=[A-ZÀ-Ý(])", r"\1 ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
 def non_whitespace_count(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
+
+
+def is_decorative_glyph_text(text: str) -> bool:
+    compact = clean_text(text).replace(" ", "")
+    if not compact:
+        return False
+    if compact in {"�", "□", "■", "▪", "▫", "☑", "✅", "✔", "✓", "脥"}:
+        return True
+    if len(compact) == 1 and ord(compact) >= 0x2600 and not compact.isalnum():
+        return True
+    if len(compact) <= 2 and all(not ch.isalnum() for ch in compact):
+        return True
+    return False
+
+
+def is_probable_decorative_span(span: dict[str, object]) -> bool:
+    text = str(span.get("text", ""))
+    if not is_decorative_glyph_text(text):
+        return False
+    font_name = str(span.get("font") or "")
+    if font_name in {"SymbolMT", "SegoeUIEmoji"}:
+        return True
+    compact = clean_text(text).replace(" ", "")
+    return len(compact) <= 2
+
+
+def line_has_wordlike_content(spans: list[dict[str, object]]) -> bool:
+    for span in spans:
+        text = str(span.get("text", ""))
+        if non_whitespace_count(text) <= 0:
+            continue
+        if any(ch.isalnum() for ch in text):
+            return True
+    return False
+
+
+def strip_leading_decorative_spans(spans: list[dict[str, object]]) -> list[dict[str, object]]:
+    if len(spans) < 2 or not line_has_wordlike_content(spans[1:]):
+        return spans
+    index = 0
+    while index < len(spans) - 1 and is_probable_decorative_span(spans[index]) and line_has_wordlike_content(spans[index + 1 :]):
+        index += 1
+    return spans[index:] if index else spans
 
 
 def dominant_span_value(span_styles: list[dict[str, object]], key: str):
@@ -125,6 +170,46 @@ def color_int_to_rgb(value: int | None) -> tuple[float, float, float]:
         return (0.0, 0.0, 0.0)
     rgb = int(value) & 0xFFFFFF
     return ((rgb >> 16) / 255.0, ((rgb >> 8) & 0xFF) / 255.0, (rgb & 0xFF) / 255.0)
+
+
+def font_cache_key(font_name: str, font_file: str | None, codepoint: int) -> tuple[str, str, int]:
+    return (font_name, font_file or "", int(codepoint))
+
+
+def font_supports_char(font: fitz.Font, font_name: str, font_file: str | None, char: str) -> bool:
+    if not char or char.isspace():
+        return True
+    key = font_cache_key(font_name, font_file, ord(char))
+    cached = _GLYPH_SUPPORT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    has_glyph = getattr(font, "has_glyph", None)
+    if not callable(has_glyph):
+        _GLYPH_SUPPORT_CACHE[key] = True
+        return True
+    try:
+        glyph = has_glyph(ord(char))
+    except Exception:
+        _GLYPH_SUPPORT_CACHE[key] = True
+        return True
+    supported = glyph > 0
+    _GLYPH_SUPPORT_CACHE[key] = supported
+    return supported
+
+
+def font_supports_text(font: fitz.Font, font_name: str, font_file: str | None, text: str) -> bool:
+    for char in text:
+        if not font_supports_char(font, font_name, font_file, char):
+            return False
+    return True
+
+
+def resolve_render_font(region: TextRegion, text: str) -> tuple[fitz.Font, str, str | None]:
+    font = fitz.Font(fontfile=region.render_font_file) if region.render_font_file else fitz.Font(region.render_font_name)
+    if region.render_font_name or region.render_font_file:
+        return font, region.render_font_name, region.render_font_file
+    fallback = fitz.Font(FONT_NAME)
+    return fallback, FONT_NAME, None
 
 
 def page_image_fast(page: fitz.Page, dpi: int) -> Image.Image:
@@ -177,12 +262,14 @@ def extract_native_regions(page: fitz.Page) -> list[TextRegion]:
             continue
         for line in block.get("lines", []):
             spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
+            spans = strip_leading_decorative_spans(spans)
             if not spans:
                 continue
             line_text = clean_text("".join(span.get("text", "") for span in spans))
             if not line_text:
                 continue
-            bbox = tuple(line.get("bbox", block.get("bbox")))
+            span_boxes = [tuple(span.get("bbox", ())) for span in spans if len(tuple(span.get("bbox", ()))) == 4]
+            bbox = union_bbox(span_boxes) if span_boxes else tuple(line.get("bbox", block.get("bbox")))
             rect = fitz.Rect(bbox)
             sizes = [float(span.get("size", 10)) for span in spans]
             span_styles = []
@@ -341,7 +428,74 @@ def estimate_background_color(page: fitz.Page, bbox: tuple[float, float, float, 
     return (r / total / 255.0, g / total / 255.0, b / total / 255.0)
 
 
-def wrap_paragraph(text: str, width: float, font: fitz.Font, font_size: float) -> list[str]:
+def iter_font_runs(
+    text: str,
+    primary_font: fitz.Font,
+    primary_font_name: str,
+    primary_font_file: str | None,
+    fallback_font: fitz.Font,
+    fallback_font_name: str,
+    fallback_font_file: str | None,
+) -> list[tuple[str, fitz.Font, str, str | None]]:
+    if not text:
+        return []
+    runs: list[tuple[str, fitz.Font, str, str | None]] = []
+    buffer = ""
+    current_font = primary_font
+    current_name = primary_font_name
+    current_file = primary_font_file
+    for char in text:
+        supported = font_supports_char(primary_font, primary_font_name, primary_font_file, char)
+        next_font = primary_font if supported else fallback_font
+        next_name = primary_font_name if supported else fallback_font_name
+        next_file = primary_font_file if supported else fallback_font_file
+        if buffer and (next_name != current_name or next_file != current_file):
+            runs.append((buffer, current_font, current_name, current_file))
+            buffer = ""
+        if not buffer:
+            current_font = next_font
+            current_name = next_name
+            current_file = next_file
+        buffer += char
+    if buffer:
+        runs.append((buffer, current_font, current_name, current_file))
+    return runs
+
+
+def measured_text_length(
+    text: str,
+    font_size: float,
+    primary_font: fitz.Font,
+    primary_font_name: str,
+    primary_font_file: str | None,
+    fallback_font: fitz.Font,
+    fallback_font_name: str = FONT_NAME,
+    fallback_font_file: str | None = None,
+) -> float:
+    return sum(
+        run_font.text_length(run_text, fontsize=font_size)
+        for run_text, run_font, _, _ in iter_font_runs(
+            text,
+            primary_font,
+            primary_font_name,
+            primary_font_file,
+            fallback_font,
+            fallback_font_name,
+            fallback_font_file,
+        )
+    )
+
+
+def wrap_paragraph(
+    text: str,
+    width: float,
+    font: fitz.Font,
+    font_size: float,
+    fallback_font: fitz.Font | None = None,
+    font_name: str = FONT_NAME,
+    font_file: str | None = None,
+) -> list[str]:
+    fallback = fallback_font or font
     words = text.split()
     if not words:
         return [""]
@@ -349,7 +503,7 @@ def wrap_paragraph(text: str, width: float, font: fitz.Font, font_size: float) -
     current = words[0]
     for word in words[1:]:
         candidate = f"{current} {word}"
-        if font.text_length(candidate, fontsize=font_size) <= width:
+        if measured_text_length(candidate, font_size, font, font_name, font_file, fallback) <= width:
             current = candidate
         else:
             lines.append(current)
@@ -366,7 +520,31 @@ def bullet_radius(font_size: float) -> float:
     return max(1.1, font_size * 0.16)
 
 
-def layout_text(text: str, width: float, font: fitz.Font, font_size: float) -> list[str]:
+def split_leading_marker(text: str) -> tuple[str | None, str]:
+    stripped = text.strip()
+    if not stripped:
+        return None, ""
+    if stripped.startswith("•"):
+        return "•", stripped[1:].strip()
+    if stripped.startswith(("-", "*")):
+        return stripped[0], stripped[1:].strip()
+    if stripped.startswith("o "):
+        return "o", stripped[2:].strip()
+    if len(stripped) >= 2 and stripped[0] in {"o", "O"} and (stripped[1].isupper() or stripped[1] == "("):
+        return stripped[0], stripped[1:].strip()
+    return None, stripped
+
+
+def layout_text(
+    text: str,
+    width: float,
+    font: fitz.Font,
+    font_size: float,
+    fallback_font: fitz.Font | None = None,
+    font_name: str = FONT_NAME,
+    font_file: str | None = None,
+) -> list[str]:
+    fallback = fallback_font or font
     paragraphs = text.splitlines() or [text]
     lines: list[str] = []
     for paragraph in paragraphs:
@@ -374,31 +552,92 @@ def layout_text(text: str, width: float, font: fitz.Font, font_size: float) -> l
         if not stripped:
             lines.append("")
             continue
-        if stripped.startswith("•"):
-            bullet = stripped[0]
-            content = stripped[1:].strip()
-            wrapped = wrap_paragraph(content, max(20, width - bullet_advance(font_size)), font, font_size)
+        marker, content = split_leading_marker(stripped)
+        if marker == "•":
+            bullet = marker
+            wrapped = wrap_paragraph(
+                content,
+                max(20, width - bullet_advance(font_size)),
+                font,
+                font_size,
+                fallback,
+                font_name,
+                font_file,
+            )
             for index, line in enumerate(wrapped):
                 lines.append(f"{bullet} {line}" if index == 0 else f"  {line}")
             continue
-        if stripped.startswith(("-", "*", "o ")):
-            bullet = stripped[0]
-            content = stripped[1:].strip()
-            wrapped = wrap_paragraph(content, max(20, width - font.text_length(f"{bullet} ", fontsize=font_size)), font, font_size)
+        if marker in {"-", "*", "o", "O"}:
+            bullet = marker
+            wrapped = wrap_paragraph(
+                content,
+                max(20, width - measured_text_length(f"{bullet} ", font_size, font, font_name, font_file, fallback)),
+                font,
+                font_size,
+                fallback,
+                font_name,
+                font_file,
+            )
             for index, line in enumerate(wrapped):
                 lines.append(f"{bullet} {line}" if index == 0 else f"  {line}")
             continue
-        lines.extend(wrap_paragraph(stripped, width, font, font_size))
+        lines.extend(wrap_paragraph(stripped, width, font, font_size, fallback, font_name, font_file))
     return lines
 
 
-def split_text_for_height(text: str, width: float, height: float, font: fitz.Font, font_size: float) -> tuple[list[str], str]:
+def split_text_for_height(
+    text: str,
+    width: float,
+    height: float,
+    font: fitz.Font,
+    font_size: float,
+    fallback_font: fitz.Font | None = None,
+    font_name: str = FONT_NAME,
+    font_file: str | None = None,
+) -> tuple[list[str], str]:
     line_height = font_size * 1.2
     max_lines = max(1, int(height // line_height))
-    lines = layout_text(text, width, font, font_size)
+    lines = layout_text(text, width, font, font_size, fallback_font, font_name, font_file)
     if len(lines) <= max_lines:
         return lines, ""
     return lines[:max_lines], "\n".join(line.lstrip() for line in lines[max_lines:]).strip()
+
+
+def draw_text_runs(
+    page: fitz.Page,
+    x: float,
+    y: float,
+    text: str,
+    font_size: float,
+    color: tuple[float, float, float],
+    primary_font: fitz.Font,
+    primary_font_name: str,
+    primary_font_file: str | None,
+    fallback_font: fitz.Font,
+    fallback_font_name: str = FONT_NAME,
+    fallback_font_file: str | None = None,
+) -> None:
+    cursor_x = float(x)
+    for run_text, run_font, run_name, run_file in iter_font_runs(
+        text,
+        primary_font,
+        primary_font_name,
+        primary_font_file,
+        fallback_font,
+        fallback_font_name,
+        fallback_font_file,
+    ):
+        if not run_text:
+            continue
+        page.insert_text(
+            fitz.Point(cursor_x, y),
+            run_text,
+            fontname=run_name,
+            fontfile=run_file,
+            fontsize=font_size,
+            color=color,
+        )
+        cursor_x += run_font.text_length(run_text, fontsize=font_size)
 
 
 def draw_lines(
@@ -413,6 +652,7 @@ def draw_lines(
     render_font_file: str | None = None,
     baseline_y: float | None = None,
 ) -> None:
+    fallback_font = fitz.Font(FONT_NAME)
     line_height = font_size * 1.2
     descender = getattr(font, "descender", -0.25)
     fallback_baseline = rect.y1 + float(descender) * font_size
@@ -431,13 +671,34 @@ def draw_lines(
         if line.startswith("• "):
             bullet_prefix = True
             content = line[2:].strip()
-            text_width = bullet_advance(font_size) + font.text_length(content, fontsize=font_size)
+            text_width = bullet_advance(font_size) + measured_text_length(
+                content,
+                font_size,
+                font,
+                render_font_name,
+                render_font_file,
+                fallback_font,
+            )
         elif line.startswith("  "):
             continuation_indent = True
             content = line.strip()
-            text_width = bullet_advance(font_size) + font.text_length(content, fontsize=font_size)
+            text_width = bullet_advance(font_size) + measured_text_length(
+                content,
+                font_size,
+                font,
+                render_font_name,
+                render_font_file,
+                fallback_font,
+            )
         else:
-            text_width = font.text_length(line, fontsize=font_size)
+            text_width = measured_text_length(
+                line,
+                font_size,
+                font,
+                render_font_name,
+                render_font_file,
+                fallback_font,
+            )
         if align == "center":
             x = rect.x0 + max(0, (rect.width - text_width) / 2)
         elif align == "right":
@@ -454,24 +715,38 @@ def draw_lines(
         elif continuation_indent:
             text_x = x + bullet_advance(font_size)
         if content.strip():
-            page.insert_text(
-                fitz.Point(text_x, cursor_y),
+            draw_text_runs(
+                page,
+                text_x,
+                cursor_y,
                 content,
-                fontname=render_font_name,
-                fontfile=render_font_file,
-                fontsize=font_size,
-                color=color,
+                font_size,
+                color,
+                font,
+                render_font_name,
+                render_font_file,
+                fallback_font,
             )
         cursor_y += line_height
 
 
 def draw_translated_text(page: fitz.Page, region: TextRegion, translated_text: str) -> str:
     rect = fitz.Rect(region.bbox)
-    font = fitz.Font(fontfile=region.render_font_file) if region.render_font_file else fitz.Font(region.render_font_name)
+    font, render_font_name, render_font_file = resolve_render_font(region, translated_text)
+    fallback_font = fitz.Font(FONT_NAME)
     for font_size in [max(region.font_size_hint, MIN_FONT_SIZE) - step for step in range(0, 9)]:
         if font_size < MIN_FONT_SIZE:
             continue
-        lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
+        lines, remainder = split_text_for_height(
+            translated_text,
+            max(20, rect.width - 2),
+            max(10, rect.height - 2),
+            font,
+            font_size,
+            fallback_font,
+            render_font_name,
+            render_font_file,
+        )
         if remainder:
             continue
         draw_lines(
@@ -482,13 +757,22 @@ def draw_translated_text(page: fitz.Page, region: TextRegion, translated_text: s
             font_size,
             region.text_color,
             region.align,
-            region.render_font_name,
-            region.render_font_file,
+            render_font_name,
+            render_font_file,
             region.baseline_y,
         )
         return ""
     font_size = MIN_FONT_SIZE
-    lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
+    lines, remainder = split_text_for_height(
+        translated_text,
+        max(20, rect.width - 2),
+        max(10, rect.height - 2),
+        font,
+        font_size,
+        fallback_font,
+        render_font_name,
+        render_font_file,
+    )
     draw_lines(
         page,
         rect,
@@ -497,8 +781,8 @@ def draw_translated_text(page: fitz.Page, region: TextRegion, translated_text: s
         font_size,
         region.text_color,
         region.align,
-        region.render_font_name,
-        region.render_font_file,
+        render_font_name,
+        render_font_file,
         region.baseline_y,
     )
     return remainder

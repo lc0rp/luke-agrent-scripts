@@ -210,13 +210,13 @@ def render_overlay_page(
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
             continue
         fill = core.estimate_background_color(source_page, tuple(block["bbox"]), "white")
-        out_page.add_redact_annot(fitz.Rect(block["bbox"]), fill=fill)
+        out_page.add_redact_annot(redaction_rect_for_block(block, page_blocks), fill=fill)
     if page_blocks:
         out_page.apply_redactions()
     for block in page_blocks:
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
             continue
-        text = block.get("translated_text") or block.get("text") or ""
+        text = overlay_text_for_block(block, page_blocks)
         if not str(text).strip():
             continue
         rect = render_rect_for_block(block, page_blocks, out_page.rect)
@@ -242,7 +242,7 @@ def render_overlay_page(
         remainder = core.draw_translated_text(out_page, region, str(text))
         if remainder:
             # Fall back to a tighter fit rather than spilling into a new page for template pages.
-            font = fitz.Font(fontfile=render_font_file) if render_font_file else fitz.Font(render_font_name)
+            font, safe_font_name, safe_font_file = core.resolve_render_font(region, str(text))
             lines = core.layout_text(str(text), max(20, rect.width - 2), font, max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0))
             core.draw_lines(
                 out_page,
@@ -252,17 +252,70 @@ def render_overlay_page(
                 max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0),
                 region.text_color,
                 region.align,
-                render_font_name,
-                render_font_file,
+                safe_font_name,
+                safe_font_file,
                 region.baseline_y,
             )
     return out_doc
 
 
-def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.Rect) -> fitz.Rect:
-    rect = fitz.Rect(block["bbox"])
-    role = str(block.get("role", ""))
+def leading_marker_artifact(block: dict, page_blocks: list[dict]) -> dict | None:
+    if str(block.get("role", "")) != "list_item":
+        return None
+    block_text = str(block.get("translated_text") or block.get("text") or "").lstrip()
+    if not block_text.startswith("•"):
+        return None
+    block_rect = fitz.Rect(block["bbox"])
+    candidates = []
+    for other in page_blocks:
+        if other["id"] == block["id"] or other.get("role") != "artifact":
+            continue
+        other_rect = fitz.Rect(other["bbox"])
+        same_line = abs(other_rect.y0 - block_rect.y0) <= 4.0
+        within_leading_lane = other_rect.x0 >= block_rect.x0 and other_rect.x1 <= block_rect.x0 + 40.0
+        if same_line and within_leading_lane:
+            candidates.append(other)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: float(item["bbox"][2]))
+
+
+def overlay_text_for_block(block: dict, page_blocks: list[dict]) -> str:
     text = str(block.get("translated_text") or block.get("text") or "")
+    marker = leading_marker_artifact(block, page_blocks)
+    if marker is None:
+        return text
+    stripped = text.lstrip()
+    if stripped.startswith("•"):
+        return stripped[1:].lstrip()
+    return text
+
+
+def content_rect_for_block(block: dict, page_blocks: list[dict]) -> fitz.Rect:
+    rect = fitz.Rect(block["bbox"])
+    marker = leading_marker_artifact(block, page_blocks)
+    if marker is not None:
+        marker_rect = fitz.Rect(marker["bbox"])
+        rect = fitz.Rect(max(rect.x0, marker_rect.x1 + 16.0), rect.y0, rect.x1, rect.y1)
+    return rect
+
+
+def redaction_rect_for_block(block: dict, page_blocks: list[dict]) -> fitz.Rect:
+    rect = fitz.Rect(block["bbox"])
+    marker = leading_marker_artifact(block, page_blocks)
+    if marker is not None:
+        marker_rect = fitz.Rect(marker["bbox"])
+        rect = fitz.Rect(max(rect.x0, marker_rect.x1 + 1.0), rect.y0, rect.x1, rect.y1)
+    role = str(block.get("role", ""))
+    if role in {"footer", "header"}:
+        return fitz.Rect(rect.x0, rect.y0 + 1.5, rect.x1, max(rect.y0 + 2.0, rect.y1 - 0.5))
+    return rect
+
+
+def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.Rect) -> fitz.Rect:
+    rect = content_rect_for_block(block, page_blocks)
+    role = str(block.get("role", ""))
+    text = overlay_text_for_block(block, page_blocks)
     style = block.get("style", {})
     font_size_hint = float(style.get("font_size_hint", 0) or 0)
     if (
