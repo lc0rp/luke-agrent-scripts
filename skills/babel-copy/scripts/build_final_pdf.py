@@ -26,6 +26,61 @@ def asset_map(payload: dict) -> dict[str, dict]:
     return {asset["id"]: asset for asset in payload.get("assets", [])}
 
 
+def clean_pdf_font_name(value: str | None) -> str:
+    if not value:
+        return ""
+    return str(value).split("+", 1)[-1]
+
+
+def font_priority(font_record: tuple) -> tuple[int, int]:
+    _, ext, pdf_font_type, *_ = font_record
+    return (2 if pdf_font_type == "Type0" else 1 if pdf_font_type == "TrueType" else 0, 1 if ext == "ttf" else 0)
+
+
+def build_source_font_catalog(source_doc: fitz.Document) -> dict[str, tuple]:
+    catalog: dict[str, tuple] = {}
+    for page_index in range(source_doc.page_count):
+        for font_record in source_doc[page_index].get_fonts():
+            font_name = clean_pdf_font_name(font_record[3] if len(font_record) > 3 else "")
+            if not font_name:
+                continue
+            existing = catalog.get(font_name)
+            if existing is None or font_priority(font_record) > font_priority(existing):
+                catalog[font_name] = font_record
+    return catalog
+
+
+def resolve_font_resource(
+    source_doc: fitz.Document,
+    font_catalog: dict[str, tuple],
+    font_name: str | None,
+    font_cache: dict[str, tuple[str, str | None]],
+    temp_dir: Path,
+) -> tuple[str, str | None]:
+    clean_name = clean_pdf_font_name(font_name)
+    if not clean_name:
+        return (core.FONT_NAME, None)
+    cached = font_cache.get(clean_name)
+    if cached:
+        return cached
+    font_record = font_catalog.get(clean_name)
+    if not font_record:
+        fallback = (core.FONT_NAME, None)
+        font_cache[clean_name] = fallback
+        return fallback
+
+    xref = int(font_record[0])
+    extracted_name, ext, _, buffer = source_doc.extract_font(xref)
+    suffix = ext or "bin"
+    font_path = temp_dir / f"{clean_name.replace(' ', '_')}-{xref}.{suffix}"
+    if not font_path.exists():
+        font_path.write_bytes(buffer)
+    alias = f"bcf_{len(font_cache)}"
+    resolved = (alias, str(font_path))
+    font_cache[clean_name] = resolved
+    return resolved
+
+
 def choose_page_mode(page: dict, assets_by_id: dict[str, dict]) -> str:
     if page.get("tables"):
         return "docx_rebuild"
@@ -137,12 +192,19 @@ def filtered_payload_for_page(payload: dict, page_number: int, assets_by_id: dic
     }
 
 
-def render_overlay_page(source_doc: fitz.Document, page_index: int, page: dict, page_blocks: list[dict]) -> fitz.Document:
+def render_overlay_page(
+    source_doc: fitz.Document,
+    page_index: int,
+    page: dict,
+    page_blocks: list[dict],
+    font_catalog: dict[str, tuple],
+    font_cache: dict[str, tuple[str, str | None]],
+    temp_dir: Path,
+) -> fitz.Document:
     out_doc = fitz.open()
     out_doc.insert_pdf(source_doc, from_page=page_index, to_page=page_index)
     out_page = out_doc[-1]
     source_page = source_doc[page_index]
-    font = fitz.Font(core.FONT_NAME)
     preserved_ids = preserved_overlay_ids(page_blocks)
     for block in page_blocks:
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
@@ -158,18 +220,40 @@ def render_overlay_page(source_doc: fitz.Document, page_index: int, page: dict, 
         if not str(text).strip():
             continue
         rect = fitz.Rect(block["bbox"])
+        style = block.get("style", {})
+        render_font_name, render_font_file = resolve_font_resource(
+            source_doc,
+            font_catalog,
+            style.get("font_name"),
+            font_cache,
+            temp_dir,
+        )
         region = core.TextRegion(
             bbox=tuple(block["bbox"]),
             text=str(block.get("text", "")),
             source=str(block.get("source", "native")),
             font_size_hint=float(block.get("style", {}).get("font_size_hint", 10.5)),
             align=str(block.get("align", "left")),
+            render_font_name=render_font_name,
+            render_font_file=render_font_file,
+            text_color=core.color_int_to_rgb(style.get("color")),
         )
         remainder = core.draw_translated_text(out_page, region, str(text))
         if remainder:
             # Fall back to a tighter fit rather than spilling into a new page for template pages.
+            font = fitz.Font(fontfile=render_font_file) if render_font_file else fitz.Font(render_font_name)
             lines = core.layout_text(str(text), max(20, rect.width - 2), font, max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0))
-            core.draw_lines(out_page, rect, lines, font, max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0), (0, 0, 0), region.align)
+            core.draw_lines(
+                out_page,
+                rect,
+                lines,
+                font,
+                max(core.MIN_FONT_SIZE, region.font_size_hint - 1.0),
+                region.text_color,
+                region.align,
+                render_font_name,
+                render_font_file,
+            )
     return out_doc
 
 
@@ -201,23 +285,27 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path) ->
     source_doc = fitz.open(source_pdf)
     out_doc = fitz.open()
     temp_paths: list[Path] = []
+    font_catalog = build_source_font_catalog(source_doc)
+    font_cache: dict[str, tuple[str, str | None]] = {}
     try:
-        for page_index, page in enumerate(payload.get("pages", [])):
-            page_number = int(page["page_number"])
-            mode = choose_page_mode(page, assets_by_id)
-            page_blocks = blocks.get(page_number, [])
-            if mode == "template_overlay":
-                rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks)
+        with tempfile.TemporaryDirectory(prefix="babel-copy-fonts-") as font_dir_raw:
+            font_dir = Path(font_dir_raw)
+            for page_index, page in enumerate(payload.get("pages", [])):
+                page_number = int(page["page_number"])
+                mode = choose_page_mode(page, assets_by_id)
+                page_blocks = blocks.get(page_number, [])
+                if mode == "template_overlay":
+                    rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks, font_catalog, font_cache, font_dir)
+                    out_doc.insert_pdf(rendered_doc)
+                    rendered_doc.close()
+                    continue
+                with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
+                    temp_path = Path(tmp_file.name)
+                temp_paths.append(temp_path)
+                render_page_via_docx(payload, page_number, temp_path, assets_by_id)
+                rendered_doc = fitz.open(temp_path)
                 out_doc.insert_pdf(rendered_doc)
                 rendered_doc.close()
-                continue
-            with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
-                temp_path = Path(tmp_file.name)
-            temp_paths.append(temp_path)
-            render_page_via_docx(payload, page_number, temp_path, assets_by_id)
-            rendered_doc = fitz.open(temp_path)
-            out_doc.insert_pdf(rendered_doc)
-            rendered_doc.close()
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
         out_doc.save(output_pdf, garbage=4, deflate=True)
         return output_pdf

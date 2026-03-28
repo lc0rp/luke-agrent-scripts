@@ -28,6 +28,9 @@ class TextRegion:
     font_size_hint: float
     align: str = "left"
     span_styles: list[dict[str, object]] = field(default_factory=list)
+    render_font_name: str = FONT_NAME
+    render_font_file: str | None = None
+    text_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -83,6 +86,26 @@ def clean_text(text: str) -> str:
 
 def non_whitespace_count(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
+
+
+def dominant_span_value(span_styles: list[dict[str, object]], key: str):
+    weights: dict[object, int] = {}
+    for span in span_styles:
+        value = span.get(key)
+        char_count = int(span.get("char_count", 0) or 0)
+        if value in ("", None) or char_count <= 0:
+            continue
+        weights[value] = weights.get(value, 0) + char_count
+    if not weights:
+        return None
+    return max(weights.items(), key=lambda item: (item[1], str(item[0])))[0]
+
+
+def color_int_to_rgb(value: int | None) -> tuple[float, float, float]:
+    if value is None:
+        return (0.0, 0.0, 0.0)
+    rgb = int(value) & 0xFFFFFF
+    return ((rgb >> 16) / 255.0, ((rgb >> 8) & 0xFF) / 255.0, (rgb & 0xFF) / 255.0)
 
 
 def page_image_fast(page: fitz.Page, dpi: int) -> Image.Image:
@@ -165,6 +188,8 @@ def extract_native_regions(page: fitz.Page) -> list[TextRegion]:
                     font_size_hint=max(8.0, (sum(sizes) / len(sizes)) if sizes else rect.height * 0.75),
                     align=infer_alignment(rect, page.rect),
                     span_styles=span_styles,
+                    render_font_name=str(dominant_span_value(span_styles, "font_name") or FONT_NAME),
+                    text_color=color_int_to_rgb(dominant_span_value(span_styles, "color")),
                 )
             )
     return regions
@@ -323,7 +348,17 @@ def split_text_for_height(text: str, width: float, height: float, font: fitz.Fon
     return lines[:max_lines], "\n".join(line.lstrip() for line in lines[max_lines:]).strip()
 
 
-def draw_lines(page: fitz.Page, rect: fitz.Rect, lines: list[str], font: fitz.Font, font_size: float, color: tuple[float, float, float], align: str) -> None:
+def draw_lines(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    lines: list[str],
+    font: fitz.Font,
+    font_size: float,
+    color: tuple[float, float, float],
+    align: str,
+    render_font_name: str,
+    render_font_file: str | None = None,
+) -> None:
     line_height = font_size * 1.2
     cursor_y = rect.y0 + font_size
     for line in lines:
@@ -337,24 +372,31 @@ def draw_lines(page: fitz.Page, rect: fitz.Rect, lines: list[str], font: fitz.Fo
         else:
             x = rect.x0
         if line.strip():
-            page.insert_text(fitz.Point(x, cursor_y), line, fontname=FONT_NAME, fontsize=font_size, color=color)
+            page.insert_text(
+                fitz.Point(x, cursor_y),
+                line,
+                fontname=render_font_name,
+                fontfile=render_font_file,
+                fontsize=font_size,
+                color=color,
+            )
         cursor_y += line_height
 
 
 def draw_translated_text(page: fitz.Page, region: TextRegion, translated_text: str) -> str:
     rect = fitz.Rect(region.bbox)
-    font = fitz.Font(FONT_NAME)
+    font = fitz.Font(fontfile=region.render_font_file) if region.render_font_file else fitz.Font(region.render_font_name)
     for font_size in [max(region.font_size_hint, MIN_FONT_SIZE) - step for step in range(0, 9)]:
         if font_size < MIN_FONT_SIZE:
             continue
         lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
         if remainder:
             continue
-        draw_lines(page, rect, lines, font, font_size, (0, 0, 0), region.align)
+        draw_lines(page, rect, lines, font, font_size, region.text_color, region.align, region.render_font_name, region.render_font_file)
         return ""
     font_size = MIN_FONT_SIZE
     lines, remainder = split_text_for_height(translated_text, max(20, rect.width - 2), max(10, rect.height - 2), font, font_size)
-    draw_lines(page, rect, lines, font, font_size, (0, 0, 0), region.align)
+    draw_lines(page, rect, lines, font, font_size, region.text_color, region.align, region.render_font_name, region.render_font_file)
     return remainder
 
 

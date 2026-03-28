@@ -10,7 +10,7 @@ from PIL import Image
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +46,9 @@ def set_paragraph_runs(paragraph, block: dict, text: str) -> None:
     paragraph.alignment = alignment_for(block.get("align"))
     role = block.get("role")
     style = block.get("style", {})
+    font_name = style.get("font_name")
+    if font_name:
+        run.font.name = str(font_name)
     if role in {"heading", "title", "form_label"} or style.get("bold"):
         run.bold = True
     if style.get("italic"):
@@ -53,6 +56,9 @@ def set_paragraph_runs(paragraph, block: dict, text: str) -> None:
     font_size = style.get("font_size_hint")
     if font_size:
         run.font.size = Pt(max(8.0, min(14.0, float(font_size))))
+    text_fill_color = style.get("text_fill_color")
+    if isinstance(text_fill_color, str) and len(text_fill_color) == 7 and text_fill_color.startswith("#"):
+        run.font.color.rgb = RGBColor.from_string(text_fill_color[1:])
 
 
 def add_block_paragraph(container, block: dict, text: str | None = None):
