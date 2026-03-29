@@ -18,6 +18,8 @@ Outputs:
 
 Do not skip preview renders. Render representative pages early and choose handling strategy from what you see, not from file type alone.
 
+Choose a document-level `font_baseline` from those preview renders before you trust extracted font metadata. Classify the visual body face as `serif` or `sans`, store it in the payload, and prefer that visual decision whenever the source font is missing, weak, or not embedded.
+
 Required properties per block:
 
 - `page_number`
@@ -40,6 +42,13 @@ Required page-level properties:
 - table-cell membership for blocks
 - page classification: `digital`, `scanned`, or `mixed`
 - chosen handling strategy hint for QA notes: `overlay`, `rebuild`, or hybrid
+
+Required document-level properties:
+
+- `font_baseline.family_class`: `serif` or `sans`
+- `font_baseline.pdf_font_name`: `Times-Roman` or `helv`
+- `font_baseline.docx_font_name`: `Times New Roman` or `Arial`
+- `font_baseline.source`: how the decision was made, preferably visual inspection
 
 ### Stage 2: Translation
 

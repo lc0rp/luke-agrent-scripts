@@ -13,6 +13,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
 from block_overrides import apply_custom_overrides_to_payload
+import core
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +31,7 @@ def alignment_for(value: str | None) -> WD_ALIGN_PARAGRAPH:
     return WD_ALIGN_PARAGRAPH.LEFT
 
 
-def configure_document(doc: Document, first_page: dict) -> None:
+def configure_document(doc: Document, first_page: dict, font_baseline: dict[str, str]) -> None:
     section = doc.sections[0]
     section.page_width = Pt(first_page["width"])
     section.page_height = Pt(first_page["height"])
@@ -39,16 +40,23 @@ def configure_document(doc: Document, first_page: dict) -> None:
     section.top_margin = Pt(32)
     section.bottom_margin = Pt(32)
     style = doc.styles["Normal"]
-    style.font.name = "Times New Roman"
+    style.font.name = str(font_baseline.get("docx_font_name") or core.DOCX_SERIF_FONT_NAME)
     style.font.size = Pt(10.5)
 
 
-def set_paragraph_runs(paragraph, block: dict, text: str) -> None:
+def block_render_text(block: dict) -> str:
+    translated = block.get("translated_text")
+    if translated is not None:
+        return str(translated)
+    return str(block.get("text", ""))
+
+
+def set_paragraph_runs(paragraph, block: dict, text: str, *, default_font_name: str) -> None:
     run = paragraph.add_run(text)
     paragraph.alignment = alignment_for(block.get("align"))
     role = block.get("role")
     style = block.get("style", {})
-    font_name = style.get("font_name")
+    font_name = style.get("font_name") or default_font_name
     if font_name:
         run.font.name = str(font_name)
     if role in {"heading", "title", "form_label"} or style.get("bold"):
@@ -63,9 +71,10 @@ def set_paragraph_runs(paragraph, block: dict, text: str) -> None:
         run.font.color.rgb = RGBColor.from_string(text_fill_color[1:])
 
 
-def add_block_paragraph(container, block: dict, text: str | None = None):
+def add_block_paragraph(container, block: dict, default_font_name: str, text: str | None = None):
     paragraph = container.add_paragraph()
-    set_paragraph_runs(paragraph, block, text or block.get("translated_text") or block.get("text") or "")
+    resolved_text = block_render_text(block) if text is None else text
+    set_paragraph_runs(paragraph, block, resolved_text, default_font_name=default_font_name)
     paragraph.paragraph_format.space_after = Pt(3)
     return paragraph
 
@@ -102,7 +111,7 @@ def add_signature_picture(cell, asset: dict, cell_bbox: list[float], scale: floa
     run.add_picture(str(image_path), width=Pt(fit_width))
 
 
-def fill_table_cell(cell, cell_data: dict, blocks_by_id: dict, assets_by_id: dict, scale: float) -> None:
+def fill_table_cell(cell, cell_data: dict, blocks_by_id: dict, assets_by_id: dict, scale: float, default_font_name: str) -> None:
     cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
     first = True
     ordered_blocks = [blocks_by_id[block_id] for block_id in cell_data.get("block_ids", []) if block_id in blocks_by_id]
@@ -111,7 +120,7 @@ def fill_table_cell(cell, cell_data: dict, blocks_by_id: dict, assets_by_id: dic
         paragraph = cell.paragraphs[0] if first and cell.paragraphs else cell.add_paragraph()
         if first:
             paragraph.text = ""
-        set_paragraph_runs(paragraph, block, block.get("translated_text") or block.get("text") or "")
+        set_paragraph_runs(paragraph, block, block_render_text(block), default_font_name=default_font_name)
         paragraph.paragraph_format.space_after = Pt(2)
         first = False
     for asset_id in cell_data.get("signature_asset_ids", []):
@@ -120,7 +129,7 @@ def fill_table_cell(cell, cell_data: dict, blocks_by_id: dict, assets_by_id: dic
             add_signature_picture(cell, asset, cell_data["bbox"], scale)
 
 
-def render_table(doc: Document, page: dict, table: dict, blocks_by_id: dict, assets_by_id: dict) -> None:
+def render_table(doc: Document, page: dict, table: dict, blocks_by_id: dict, assets_by_id: dict, default_font_name: str) -> None:
     rows = table["rows"]
     columns = table["columns"]
     doc_table = doc.add_table(rows=len(rows) - 1, cols=len(columns) - 1)
@@ -142,12 +151,14 @@ def render_table(doc: Document, page: dict, table: dict, blocks_by_id: dict, ass
         doc_row = doc_table.rows[row_index]
         doc_row.height = Pt(row_height)
         for col_index in range(len(columns) - 1):
-            fill_table_cell(doc_row.cells[col_index], cells_by_position[(row_index, col_index)], blocks_by_id, assets_by_id, scale)
+            fill_table_cell(doc_row.cells[col_index], cells_by_position[(row_index, col_index)], blocks_by_id, assets_by_id, scale, default_font_name)
 
 
 def main() -> int:
     args = parse_args()
     payload = apply_custom_overrides_to_payload(json.loads(Path(args.translated_blocks_json).read_text()))
+    font_baseline = core.font_baseline_from_payload(payload)
+    default_font_name = str(font_baseline.get("docx_font_name") or core.DOCX_SERIF_FONT_NAME)
     pages = payload.get("pages", [])
     blocks = payload["blocks"]
     assets = payload.get("assets", [])
@@ -163,7 +174,7 @@ def main() -> int:
         page_blocks.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
 
     doc = Document()
-    configure_document(doc, pages[0])
+    configure_document(doc, pages[0], font_baseline)
 
     first_page = True
     for page in pages:
@@ -180,10 +191,10 @@ def main() -> int:
                 continue
             if block.get("role") == "artifact":
                 continue
-            add_block_paragraph(doc, block)
+            add_block_paragraph(doc, block, default_font_name)
 
         for table in sorted(page.get("tables", []), key=lambda item: item["bbox"][1]):
-            render_table(doc, page, table, blocks_by_id, assets_by_id)
+            render_table(doc, page, table, blocks_by_id, assets_by_id, default_font_name)
 
     output_path = Path(args.output_docx).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)

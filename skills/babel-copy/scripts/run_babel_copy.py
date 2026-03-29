@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pages")
     parser.add_argument("--magnify-factor", type=float, default=2.0)
     parser.add_argument("--dpi", type=int, default=144)
+    parser.add_argument("--font-baseline", help="Visual fallback font family override: serif or sans.")
     parser.add_argument("--model")
     parser.add_argument("--batch-size", type=int, default=18)
     parser.add_argument("--skip-compare", action="store_true")
@@ -56,11 +57,13 @@ def recommend_pages(payload: dict) -> list[int]:
 
 
 def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: Path, notes_path: Path) -> None:
+    font_baseline = extract_payload.get("font_baseline", {})
     lines = [
         "# Babel Copy Check Notes",
         "",
         f"- Final PDF: `{translated_pdf}`",
         f"- Source page count: {extract_payload.get('page_count')}",
+        f"- Font baseline: `{font_baseline.get('family_class', 'unknown')}` via `{font_baseline.get('source', 'unknown')}`",
         "",
         "## Recommended Visual Checks",
         "",
@@ -114,6 +117,8 @@ def main() -> int:
     ]
     if args.pages:
         extract_cmd.extend(["--pages", args.pages])
+    if args.font_baseline:
+        extract_cmd.extend(["--font-baseline", args.font_baseline])
     run_step(extract_cmd)
 
     blocks_json = extract_dir / "blocks.json"

@@ -16,9 +16,56 @@ DEFAULT_DPI = 220
 DEFAULT_OCR_MAGNIFY = 2.0
 MIN_FONT_SIZE = 6.5
 FONT_NAME = "helv"
+PDF_SERIF_FONT_NAME = "Times-Roman"
+PDF_SANS_FONT_NAME = "helv"
+DOCX_SERIF_FONT_NAME = "Times New Roman"
+DOCX_SANS_FONT_NAME = "Arial"
+DEFAULT_FONT_BASELINE_CLASS = "serif"
 DEFAULT_OCR_LANG = "eng"
 DEFAULT_OCR_PSM = "4"
 _GLYPH_SUPPORT_CACHE: dict[tuple[str, str, int], bool] = {}
+_SERIF_FONT_HINTS = (
+    "baskerville",
+    "bookman",
+    "bodoni",
+    "cambria",
+    "caslon",
+    "constantia",
+    "didot",
+    "garamond",
+    "georgia",
+    "liberationserif",
+    "minion",
+    "palatino",
+    "ptserif",
+    "serif",
+    "times",
+)
+_SANS_FONT_HINTS = (
+    "arial",
+    "aptos",
+    "avenir",
+    "calibri",
+    "franklingothic",
+    "frutiger",
+    "futura",
+    "gillsans",
+    "grotesk",
+    "grotesque",
+    "helvetica",
+    "helv",
+    "montserrat",
+    "notosans",
+    "opensans",
+    "ptsans",
+    "sans",
+    "segoeui",
+    "sourceSans",
+    "sourcesans",
+    "tahoma",
+    "univers",
+    "verdana",
+)
 
 
 @dataclass
@@ -56,6 +103,101 @@ class PageReport:
     overlay_background: str
     continuations: int = 0
     compromises: list[str] = field(default_factory=list)
+
+
+def normalize_font_family_class(value: object) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"sans", "sans-serif", "sans serif"}:
+        return "sans"
+    if raw == "serif":
+        return "serif"
+    return None
+
+
+def pdf_font_name_for_family_class(family_class: object) -> str:
+    return PDF_SANS_FONT_NAME if normalize_font_family_class(family_class) == "sans" else PDF_SERIF_FONT_NAME
+
+
+def docx_font_name_for_family_class(family_class: object) -> str:
+    return DOCX_SANS_FONT_NAME if normalize_font_family_class(family_class) == "sans" else DOCX_SERIF_FONT_NAME
+
+
+def build_font_baseline(family_class: object, *, source: str, reason: str | None = None) -> dict[str, str]:
+    normalized = normalize_font_family_class(family_class) or DEFAULT_FONT_BASELINE_CLASS
+    baseline = {
+        "family_class": normalized,
+        "pdf_font_name": pdf_font_name_for_family_class(normalized),
+        "docx_font_name": docx_font_name_for_family_class(normalized),
+        "source": str(source),
+    }
+    if reason:
+        baseline["reason"] = reason
+    return baseline
+
+
+def infer_font_family_from_font_name(font_name: object) -> str | None:
+    compact = re.sub(r"[^a-z0-9]+", "", str(font_name or "").lower())
+    if not compact:
+        return None
+    if any(hint in compact for hint in _SANS_FONT_HINTS):
+        return "sans"
+    if any(hint in compact for hint in _SERIF_FONT_HINTS):
+        return "serif"
+    return None
+
+
+def infer_font_baseline_from_blocks(blocks: list[dict]) -> dict[str, str]:
+    counts = {"serif": 0, "sans": 0}
+    samples: list[str] = []
+    for block in blocks:
+        style = block.get("style", {}) if isinstance(block, dict) else {}
+        font_name = style.get("font_name") if isinstance(style, dict) else None
+        family_class = infer_font_family_from_font_name(font_name)
+        if not family_class:
+            continue
+        counts[family_class] += 1
+        if len(samples) < 4 and font_name:
+            samples.append(str(font_name))
+    if counts["sans"] > counts["serif"]:
+        reason = "Inferred sans-serif baseline from native font names."
+        if samples:
+            reason += f" Samples: {', '.join(samples)}."
+        return build_font_baseline("sans", source="native_font_guess", reason=reason)
+    if counts["serif"] > 0:
+        reason = "Inferred serif baseline from native font names."
+        if samples:
+            reason += f" Samples: {', '.join(samples)}."
+        return build_font_baseline("serif", source="native_font_guess", reason=reason)
+    return build_font_baseline(
+        DEFAULT_FONT_BASELINE_CLASS,
+        source="default",
+        reason="No reliable native font signal was available; using the default serif fallback baseline.",
+    )
+
+
+def font_baseline_from_payload(payload: dict | None) -> dict[str, str]:
+    if isinstance(payload, dict):
+        candidate = payload.get("font_baseline")
+        if isinstance(candidate, dict):
+            family_class = normalize_font_family_class(candidate.get("family_class"))
+            if family_class:
+                baseline = build_font_baseline(
+                    family_class,
+                    source=str(candidate.get("source") or "payload"),
+                    reason=str(candidate.get("reason")) if candidate.get("reason") else None,
+                )
+                for key, value in candidate.items():
+                    if key not in baseline and value is not None:
+                        baseline[key] = value
+                return baseline
+        blocks = payload.get("blocks")
+        if isinstance(blocks, list):
+            return infer_font_baseline_from_blocks(blocks)
+    return build_font_baseline(
+        DEFAULT_FONT_BASELINE_CLASS,
+        source="default",
+        reason="No payload was available; using the default serif fallback baseline.",
+    )
 
 
 def ensure_pdf(path: Path) -> None:

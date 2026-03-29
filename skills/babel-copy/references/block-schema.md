@@ -9,6 +9,13 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
   "input_pdf": "/abs/path/source.pdf",
   "page_count": 3,
   "block_count": 42,
+  "font_baseline": {
+    "family_class": "serif",
+    "pdf_font_name": "Times-Roman",
+    "docx_font_name": "Times New Roman",
+    "source": "visual_override",
+    "reason": "Chosen from visual inspection of representative page renders."
+  },
   "pages": [
     {
       "page_number": 3,
@@ -120,6 +127,11 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 
 ## Notes
 
+- `font_baseline` is a document-level fallback decision. Set it from visual inspection first whenever possible.
+- If `font_baseline` conflicts with weak extracted font metadata or a source font that is not embedded / not reusable, the visual baseline should win.
+- `font_baseline.family_class` should be `serif` or `sans`.
+- PDF overlay fallback mapping is `serif -> Times-Roman`, `sans -> helv`.
+- DOCX rebuild fallback mapping is `serif -> Times New Roman`, `sans -> Arial`.
 - `header` and `footer` text should be translated unless they are purely non-linguistic marks.
 - `keep_original: true` is for non-text or non-translatable visual elements, not for repeated boilerplate text.
 - `style.font_name`, `style.flags`, `style.color`, and `style.text_fill_color` are block-level summaries for native text only, not full per-span style runs.

@@ -13,7 +13,18 @@ import numpy as np
 import pytesseract
 from PIL import Image
 
-from core import classify_page, clean_text, extract_native_regions, extract_ocr_regions, infer_alignment, parse_page_selection, split_leading_marker
+from core import (
+    build_font_baseline,
+    classify_page,
+    clean_text,
+    extract_native_regions,
+    extract_ocr_regions,
+    font_baseline_from_payload,
+    infer_alignment,
+    normalize_font_family_class,
+    parse_page_selection,
+    split_leading_marker,
+)
 
 
 def region_style_signature(region) -> tuple[str, tuple[float, float, float]]:
@@ -30,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pages")
     parser.add_argument("--magnify-factor", type=float, default=2.0)
     parser.add_argument("--dpi", type=int, default=144)
+    parser.add_argument("--font-baseline", help="Visual fallback font family override: serif or sans.")
     return parser.parse_args()
 
 
@@ -1445,10 +1457,23 @@ def main() -> int:
 
     mark_repeated_headers_and_footers(all_blocks, pages_payload)
 
+    if args.font_baseline:
+        family_class = normalize_font_family_class(args.font_baseline)
+        if not family_class:
+            raise SystemExit("--font-baseline must be 'serif' or 'sans'.")
+        font_baseline = build_font_baseline(
+            family_class,
+            source="visual_override",
+            reason="Operator-selected from visual inspection of the rendered source pages.",
+        )
+    else:
+        font_baseline = font_baseline_from_payload({"blocks": all_blocks})
+
     payload = {
         "input_pdf": str(input_pdf),
         "page_count": len(pages_payload),
         "block_count": len(all_blocks),
+        "font_baseline": font_baseline,
         "pages": pages_payload,
         "blocks": all_blocks,
         "assets": all_assets,

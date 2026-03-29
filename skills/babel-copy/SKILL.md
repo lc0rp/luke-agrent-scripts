@@ -20,6 +20,7 @@ Use this skill when the translated document should read like a proper target-lan
 - Working artifacts:
   - source text in Markdown
   - structured block manifest
+  - document-level `font_baseline` captured in the manifest
   - translated text in Markdown or JSON blocks
   - rebuilt rich-layout source, preferably `.html` & `.css`
   - QA renders and notes
@@ -68,6 +69,18 @@ Preferred handling by class:
 
 Always render preview images first. Inspect at least the first page, one dense body page, and one page with forms/tables/signatures before choosing a final layout strategy. Do this before making assumptions about whether a document should be rebuilt or overlaid.
 
+Choose a document-level fallback font baseline from those preview renders before trusting extracted font metadata:
+
+- visually classify the document body text as `serif` or `sans`
+- store that choice in top-level `font_baseline`
+- when visual inspection conflicts with weak native metadata or a non-embedded source font, visual inspection wins
+- use `scripts/extract_document.py --font-baseline serif|sans` or `scripts/run_babel_copy.py --font-baseline serif|sans` when you have already made the visual call
+
+Baseline mapping:
+
+- `serif` -> PDF overlay fallback `Times-Roman`; DOCX rebuild fallback `Times New Roman`
+- `sans` -> PDF overlay fallback `helv`; DOCX rebuild fallback `Arial`
+
 Clean OCR noise during extraction:
 
 - normalize damaged glyphs and punctuation
@@ -88,6 +101,7 @@ Run it to create:
 - `blocks.json`
 - `assets/`
 - page renders for QA and fallback composition
+- `font_baseline` metadata for later fallback-font decisions
 
 ### 2. Translate
 
@@ -128,6 +142,8 @@ Use Word-style paragraph layout for legal documents unless HTML, React, canvas, 
 
 Approximate the source, but do not keep dirty scan backgrounds unless they are necessary to preserve meaning.
 
+When a block lacks good font data, or the extracted source font is not embedded / not reusable, rebuild against the document `font_baseline` instead of blindly trusting `style.font_name`.
+
 Choose layout strategy per document class:
 
 - `source-page overlay`: best for branded native PDFs, complex visual templates, scan-heavy pages, arrows/flow charts, or any page where the original is the best layout template
@@ -146,6 +162,7 @@ Current bundled rebuild path:
 This now supports:
 
 - page-size-aware `.docx` rebuild
+- visual-first serif / sans fallback selection carried from extraction into rebuild
 - detected table and form reconstruction
 - signature and stamp image crops placed back into table cells
 - manual block-translation templates for rebuild-first workflows
