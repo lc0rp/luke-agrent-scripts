@@ -72,10 +72,22 @@ def resolve_font_resource(
 
     xref = int(font_record[0])
     extracted_name, ext, _, buffer = source_doc.extract_font(xref)
-    suffix = ext or "bin"
+    suffix = (ext or "bin").strip().lstrip(".")
+    if not suffix or "/" in suffix or "\\" in suffix:
+        suffix = "bin"
+    if not buffer:
+        fallback = (core.FONT_NAME, None)
+        font_cache[clean_name] = fallback
+        return fallback
     font_path = temp_dir / f"{clean_name.replace(' ', '_')}-{xref}.{suffix}"
     if not font_path.exists():
         font_path.write_bytes(buffer)
+    try:
+        fitz.Font(fontfile=str(font_path))
+    except Exception:
+        fallback = (core.FONT_NAME, None)
+        font_cache[clean_name] = fallback
+        return fallback
     alias = f"bcf_{len(font_cache)}"
     resolved = (alias, str(font_path))
     font_cache[clean_name] = resolved

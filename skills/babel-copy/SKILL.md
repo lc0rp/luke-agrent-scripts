@@ -192,6 +192,23 @@ Run a check step before declaring success:
 - compare source vs translated renders side by side with `scripts/compare_rendered_pages.py`
 - use judgment on the rendered images; do not trust the pipeline just because it completed
 
+If the comparison reveals a local layout problem that does not justify changing extraction or renderer logic, use a targeted post-process override pass:
+
+- edit `translated_blocks.json`, not `blocks.json`
+- add `custom_override` only to the affected block(s)
+- use it for small bbox nudges, width/height expansion, font-size adjustments, alignment changes, color changes, or direct text overrides
+- important override semantics:
+  - numeric values in `custom_override` are treated as deltas by default
+  - this applies to bbox edge values such as `left`, `top`, `right`, `bottom` and to numeric style fields such as `font_size_hint`
+  - use explicit signed deltas like `+12` or `-4` when you want relative movement or expansion
+  - if you need an absolute numeric target, pass it as a quoted numeric string such as `"533.0"` rather than `533.0`
+  - do not assume bare numeric JSON values are absolute coordinates
+- rerun `scripts/build_final_pdf.py`
+- rerun `scripts/compare_rendered_pages.py`
+- prefer the smallest override set that fixes the visible issue
+
+Use overrides for document-specific cleanup, not for systematic bugs that should be fixed in the pipeline itself.
+
 Visually inspect:
 
 - first page
@@ -207,6 +224,7 @@ Final notes must state:
 - whether page count changed
 - whether the rebuilt output is closer to a clean reconstruction or a source-overlay fallback
 - what strategy was chosen and why (`overlay`, `rebuild`, or hybrid)
+- whether any `custom_override` adjustments were applied after comparison
 
 ## Current Implementation
 
