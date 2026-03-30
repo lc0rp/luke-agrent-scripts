@@ -85,6 +85,7 @@ def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: 
             "- Confirm translated headers and footers are present and legible.",
             "- Confirm page count changes are intentional.",
             "- Confirm tables/forms remain structurally readable.",
+            "- Confirm the rendered pages were visually checked for overlapping text and other layout defects.",
             "- Confirm arrows, connectors, logos, signatures, stamps, and handwritten marks survived appropriately.",
             "- If a page looks wrong, rerun with a narrower page selection and adjust translation or strategy instead of accepting silent drift.",
         ]

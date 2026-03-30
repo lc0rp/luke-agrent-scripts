@@ -4,9 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+import os
 from pathlib import Path
 import re
 from statistics import median
+import subprocess
+import tempfile
 
 import fitz
 import numpy as np
@@ -25,6 +28,9 @@ from core import (
     parse_page_selection,
     split_leading_marker,
 )
+
+
+_FRAGMENT_MERGE_LLM_CACHE: dict[str, bool] = {}
 
 
 def region_style_signature(region) -> tuple[str, tuple[float, float, float]]:
@@ -48,7 +54,7 @@ def parse_args() -> argparse.Namespace:
 def merge_regions(regions):
     blocks = []
     current = None
-    for region in regions:
+    for index, region in enumerate(regions):
         rect = fitz.Rect(region.bbox)
         if current is None:
             current = {
@@ -68,10 +74,16 @@ def merge_regions(regions):
             or current["source"] != "native"
             or region_style_signature(region) == current["style_signature"]
         )
+        next_region = regions[index + 1] if index + 1 < len(regions) else None
+        force_break = (
+            region.source == "native"
+            and current["source"] == "native"
+            and should_force_native_line_break(current["regions"][-1], region, next_region)
+        )
         current_is_bullet_only = is_bullet_only_text(current["regions"][-1].text)
         region_is_bullet_only = is_bullet_only_text(region.text)
         mergeable_direction = not (region_is_bullet_only and not current_is_bullet_only)
-        if same_align and close_y and similar_x and similar_style and mergeable_direction:
+        if same_align and close_y and similar_x and similar_style and mergeable_direction and not force_break:
             current["regions"].append(region)
             current["rect"] = current_rect | rect
         else:
@@ -132,6 +144,86 @@ def re_match_lettered_heading(text: str) -> bool:
     import re
 
     return bool(re.match(r"^[A-Za-z]\.\s+\S", text))
+
+
+def region_font_size(region) -> float:
+    dominant = getattr(region, "dominant_font_size", None)
+    if dominant is not None:
+        return float(dominant)
+    return float(getattr(region, "font_size_hint", 10.0) or 10.0)
+
+
+def text_letter_counts(text: str) -> tuple[int, int]:
+    upper = 0
+    lower = 0
+    for char in text:
+        if not char.isalpha():
+            continue
+        if char.isupper():
+            upper += 1
+        elif char.islower():
+            lower += 1
+    return upper, lower
+
+
+def is_label_like_line(text: str) -> bool:
+    stripped = clean_text(text)
+    if not stripped:
+        return False
+    upper, lower = text_letter_counts(stripped)
+    alpha = upper + lower
+    short = len(stripped) <= 48 and len(stripped.split()) <= 6
+    if alpha == 0 or not short:
+        return False
+    if stripped.endswith(":") and upper >= lower:
+        return True
+    if stripped.isupper() and len(stripped) >= 4:
+        return True
+    if re_match_numbered(stripped) or re_match_lettered_heading(stripped):
+        return upper >= lower
+    return False
+
+
+def is_body_like_line(text: str) -> bool:
+    stripped = clean_text(text)
+    if not stripped:
+        return False
+    upper, lower = text_letter_counts(stripped)
+    if lower >= 2 and len(stripped) >= 24:
+        return True
+    return len(stripped.split()) >= 5 and lower >= 1
+
+
+def should_force_native_line_break(previous_region, current_region, next_region=None) -> bool:
+    previous_text = clean_text(getattr(previous_region, "text", ""))
+    current_text = clean_text(getattr(current_region, "text", ""))
+    next_text = clean_text(getattr(next_region, "text", "")) if next_region is not None else ""
+    if not previous_text or not current_text:
+        return False
+
+    prev_rect = fitz.Rect(previous_region.bbox)
+    curr_rect = fitz.Rect(current_region.bbox)
+    next_rect = fitz.Rect(next_region.bbox) if next_region is not None else None
+    gap_before = float(curr_rect.y0 - prev_rect.y1)
+    gap_after = float(next_rect.y0 - curr_rect.y1) if next_rect is not None else 0.0
+
+    prev_size = region_font_size(previous_region)
+    curr_size = region_font_size(current_region)
+    next_size = region_font_size(next_region) if next_region is not None else curr_size
+    size_contrast = abs(curr_size - prev_size) >= 0.75 or abs(curr_size - next_size) >= 0.75
+    isolated = gap_before >= max(4.5, curr_size * 0.35) or gap_after >= max(4.5, curr_size * 0.35)
+
+    if is_label_like_line(current_text):
+        if is_body_like_line(previous_text) and (isolated or size_contrast or previous_text.endswith(":") or is_body_like_line(next_text)):
+            return True
+        if previous_text.endswith(":") and (isolated or is_body_like_line(next_text)):
+            return True
+
+    if is_label_like_line(previous_text) and is_body_like_line(current_text):
+        if previous_text.endswith(":") or gap_before >= max(4.5, prev_size * 0.35) or size_contrast:
+            return True
+
+    return False
 
 
 def groups_from_indices(values: list[int], max_gap: int = 1) -> list[tuple[int, int]]:
@@ -283,9 +375,26 @@ def summarize_block_style(block: dict) -> dict:
 
 def block_alignment_from_native_lines(block: dict, page_rect: fitz.Rect) -> str:
     native_lines = block.get("_native_lines", [])
+    rect = fitz.Rect(block["bbox"])
+    role = str(block.get("role", ""))
+    text = clean_text(str(block.get("text", "")))
+    line_count = block_line_count(block)
+    text_length = len(text)
+    centered = abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    narrow = rect.width < page_rect.width * 0.55
+
+    if role == "paragraph":
+        if centered and narrow and line_count == 1 and text_length <= 28:
+            return "center"
+        if rect.x1 > page_rect.width * 0.85 and rect.width < page_rect.width * 0.4:
+            return "right"
+        if line_count >= 2:
+            return "left"
+        if rect.width >= page_rect.width * 0.32 and text_length >= 36:
+            return "left"
+        return "left"
+
     if len(native_lines) < 2:
-        rect = fitz.Rect(block["bbox"])
-        role = str(block.get("role", ""))
         if (
             role == "paragraph"
             and rect.x0 <= page_rect.width * 0.16
@@ -613,9 +722,10 @@ def build_table_cells(page_number: int, table: dict) -> list[dict]:
     return cells
 
 
-def merge_paragraph_fragments(page_blocks: list[dict]) -> list[dict]:
+def merge_paragraph_fragments(page_blocks: list[dict], llm_decisions: set[tuple[str, str]] | None = None) -> list[dict]:
     if not page_blocks:
         return page_blocks
+    llm_decisions = llm_decisions or set()
     ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
     merged: list[dict] = []
     for block in ordered:
@@ -623,7 +733,7 @@ def merge_paragraph_fragments(page_blocks: list[dict]) -> list[dict]:
             merged.append(block)
             continue
         previous = merged[-1]
-        if should_merge_fragment(previous, block):
+        if should_merge_fragment(previous, block) or (str(previous["id"]), str(block["id"])) in llm_decisions:
             previous["text"] = clean_text(f"{previous['text']}\n{block['text']}")
             previous["bbox"] = [
                 round(min(previous["bbox"][0], block["bbox"][0]), 2),
@@ -984,6 +1094,204 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     if len(current_text) <= 32 and (current_text.isupper() or " " not in current_text):
         return True
     return False
+
+
+def llm_fragment_merge_enabled() -> bool:
+    value = os.environ.get("BABEL_COPY_ENABLE_LLM_FRAGMENT_MERGE", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def fragment_merge_cache_key(previous: dict, current: dict) -> str:
+    payload = {
+        "previous_text": clean_text(str(previous.get("text", ""))),
+        "current_text": clean_text(str(current.get("text", ""))),
+        "previous_role": str(previous.get("role", "")),
+        "current_role": str(current.get("role", "")),
+        "previous_bbox": [round(float(value), 2) for value in previous.get("bbox", [])],
+        "current_bbox": [round(float(value), 2) for value in current.get("bbox", [])],
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def text_is_merge_artifact_candidate(text: str) -> bool:
+    stripped = clean_text(text)
+    if not stripped:
+        return False
+    if is_probable_artifact(stripped):
+        return False
+    alpha_count = sum(ch.isalpha() for ch in stripped)
+    weird_count = sum(not ch.isalnum() and not ch.isspace() and ch not in "•-–—()/:,.;&@+'\"" for ch in stripped)
+    if alpha_count <= 2 and weird_count >= max(2, alpha_count):
+        return False
+    return True
+
+
+def is_ambiguous_fragment_pair(previous: dict, current: dict) -> bool:
+    if previous.get("table") or current.get("table"):
+        return False
+    if previous.get("role") == "artifact" or current.get("role") == "artifact":
+        return False
+    previous_text = clean_text(str(previous.get("text", "")))
+    current_text = clean_text(str(current.get("text", "")))
+    if not text_is_merge_artifact_candidate(previous_text) or not text_is_merge_artifact_candidate(current_text):
+        return False
+    gap = float(current["bbox"][1]) - float(previous["bbox"][3])
+    if gap < -6 or gap > 14:
+        return False
+    previous_rect = fitz.Rect(previous["bbox"])
+    current_rect = fitz.Rect(current["bbox"])
+    if abs(current_rect.x0 - previous_rect.x0) > 36 and not (
+        current_rect.x0 >= previous_rect.x0 + 12 and current_rect.x1 <= previous_rect.x1 + 10
+    ):
+        return False
+    previous_role = str(previous.get("role", ""))
+    current_role = str(current.get("role", ""))
+    if {previous_role, current_role} - {"paragraph", "heading"}:
+        return False
+    if previous_text.endswith((".", "!", "?")):
+        return False
+    if current_text[:1].islower():
+        return True
+    if current_role == "heading" and len(current_text) <= 96:
+        return True
+    if len(current_text) <= 96 and (
+        current_text.isupper()
+        or "\n" in str(current.get("text", ""))
+        or previous_text.split()[-1].lower() in {"de", "du", "des", "le", "la", "les", "d", "et", "of", "the", "and", "to", "for"}
+    ):
+        return True
+    return False
+
+
+def codex_fragment_merge_model() -> str | None:
+    value = os.environ.get("BABEL_COPY_FRAGMENT_MERGE_MODEL", "").strip()
+    return value or None
+
+
+def build_fragment_merge_prompt(candidates: list[dict]) -> str:
+    payload = []
+    for item in candidates:
+        payload.append(
+            {
+                "pair_id": item["pair_id"],
+                "page_number": item["page_number"],
+                "previous_role": item["previous_role"],
+                "current_role": item["current_role"],
+                "vertical_gap": item["vertical_gap"],
+                "previous_text": item["previous_text"],
+                "current_text": item["current_text"],
+            }
+        )
+    return f"""Decide whether each adjacent document fragment pair should be merged into a single paragraph or heading block.
+
+Rules:
+- Return JSON only.
+- Answer "yes" only when the current fragment is clearly a continuation of the previous fragment.
+- Answer "no" when the current fragment starts a new paragraph, section, party, clause, or label.
+- Be conservative. If uncertain, answer "no".
+
+Return exactly this shape:
+{{
+  "decisions": {{
+    "pair_id": "yes or no"
+  }}
+}}
+
+Pairs:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+
+
+def parse_fragment_merge_response(raw: str) -> dict[str, bool]:
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("Empty codex response")
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.startswith("json"):
+            raw = raw[4:].strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in codex response")
+    payload = json.loads(raw[start : end + 1])
+    decisions = payload.get("decisions", {})
+    if not isinstance(decisions, dict):
+        raise ValueError("Unexpected codex response structure")
+    parsed: dict[str, bool] = {}
+    for key, value in decisions.items():
+        parsed[str(key)] = str(value).strip().lower() == "yes"
+    return parsed
+
+
+def run_codex_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, bool]:
+    with tempfile.TemporaryDirectory(prefix="babel-copy-fragment-merge-") as tmp_raw:
+        tmp_dir = Path(tmp_raw)
+        output_file = tmp_dir / "last-message.txt"
+        cmd = [
+            "codex",
+            "exec",
+            "--skip-git-repo-check",
+            "-C",
+            str(cwd),
+            "--ephemeral",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-o",
+            str(output_file),
+            "-",
+        ]
+        model = codex_fragment_merge_model()
+        if model:
+            cmd.extend(["--model", model])
+        subprocess.run(cmd, input=build_fragment_merge_prompt(candidates), text=True, check=True)
+        return parse_fragment_merge_response(output_file.read_text())
+
+
+def llm_fragment_merge_decisions(page_blocks: list[dict], cwd: Path) -> set[tuple[str, str]]:
+    if not llm_fragment_merge_enabled():
+        return set()
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    decisions: set[tuple[str, str]] = set()
+    candidates: list[dict] = []
+    candidate_keys: dict[str, tuple[str, str]] = {}
+    for previous, current in zip(ordered, ordered[1:]):
+        if should_merge_fragment(previous, current):
+            continue
+        if not is_ambiguous_fragment_pair(previous, current):
+            continue
+        cache_key = fragment_merge_cache_key(previous, current)
+        cached = _FRAGMENT_MERGE_LLM_CACHE.get(cache_key)
+        if cached is True:
+            decisions.add((str(previous["id"]), str(current["id"])))
+            continue
+        if cached is False:
+            continue
+        pair_id = f"{previous['id']}->{current['id']}"
+        candidates.append(
+            {
+                "pair_id": pair_id,
+                "page_number": int(previous["page_number"]),
+                "previous_role": str(previous.get("role", "")),
+                "current_role": str(current.get("role", "")),
+                "vertical_gap": round(float(current["bbox"][1]) - float(previous["bbox"][3]), 2),
+                "previous_text": clean_text(str(previous.get("text", ""))),
+                "current_text": clean_text(str(current.get("text", ""))),
+                "cache_key": cache_key,
+            }
+        )
+        candidate_keys[pair_id] = (str(previous["id"]), str(current["id"]))
+    if not candidates:
+        return decisions
+    try:
+        raw_decisions = run_codex_fragment_merge(candidates, cwd=cwd)
+    except Exception:
+        raw_decisions = {}
+    for candidate in candidates:
+        result = bool(raw_decisions.get(candidate["pair_id"], False))
+        _FRAGMENT_MERGE_LLM_CACHE[candidate["cache_key"]] = result
+        if result:
+            decisions.add(candidate_keys[candidate["pair_id"]])
+    return decisions
 
 
 def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
@@ -1406,7 +1714,7 @@ def main() -> int:
         enrich_tall_cells_with_ocr(render_path, page.rect, page_tables, page_blocks)
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
-        page_blocks = merge_paragraph_fragments(page_blocks)
+        page_blocks = merge_paragraph_fragments(page_blocks, llm_fragment_merge_decisions(page_blocks, cwd=input_pdf.parent))
         page_blocks = dedupe_ocr_blocks(page_blocks)
         mark_textual_table_like_rows(page_blocks)
         textual_tables = build_textual_tables(page_number, page_blocks)

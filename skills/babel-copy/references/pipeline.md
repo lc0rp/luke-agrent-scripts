@@ -126,6 +126,8 @@ For branded native PDFs, source-overlay is often the primary strategy rather tha
 
 Export the rebuilt editable source to PDF, then compare against the original.
 
+Use the comparison step to generate side-by-side page renders for human review.
+
 If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through `.docx` first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
 
 QA priorities:
@@ -133,12 +135,21 @@ QA priorities:
 - page count
 - heading placement
 - body readability
+- no newly introduced overlapping text in the translated output
 - no stray OCR junk
 - signature preservation
 - no catastrophic overflow
 - translated headers and footers
 - connector, arrow, and flow-chart preservation
 - overlay background color match
+
+When visual QA reveals overlapping text or any other layout defect, treat that as a blocking warning. Review the side-by-side pages, patch `translated_blocks.json`, rebuild, and rerun comparison before sign-off.
+
+Visual inspection scope:
+
+- if the document is 20 pages or fewer, inspect every page
+- if the document is longer than 20 pages, inspect the first page, the last page, and every page with signatures, tables, forms, or diagrams
+- on each reviewed page, explicitly check for overlapping text, duplicate text draws, collisions between nearby translated blocks, and text crossing table, form, or signature boundaries
 
 ## Near-Term Implementation Order
 

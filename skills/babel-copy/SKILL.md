@@ -209,7 +209,7 @@ Run a check step before declaring success:
 - compare source vs translated renders side by side with `scripts/compare_rendered_pages.py`
 - use judgment on the rendered images; do not trust the pipeline just because it completed
 
-If the comparison reveals a local layout problem that does not justify changing extraction or renderer logic, use a targeted post-process override pass:
+If visual QA reveals overlapping text or any other local layout problem that does not justify changing extraction or renderer logic, use a targeted post-process override pass:
 
 - edit `translated_blocks.json`, not `blocks.json`
 - add `custom_override` only to the affected block(s)
@@ -228,12 +228,12 @@ Use overrides for document-specific cleanup, not for systematic bugs that should
 
 Visually inspect:
 
-- first page
-- last page
-- every page with signatures, tables, forms, or diagrams
-- every page where the rebuilt text was tightened to avoid overflow
-- every page with headers/footers that were translated
-- every page with arrows, flow charts, or connector lines
+- for documents with 20 pages or fewer, inspect every page
+- for documents with more than 20 pages, inspect the first page, the last page, and every page with signatures, tables, forms, or diagrams
+- inspect each reviewed page for overlapping text, duplicate text draws, collision between translated blocks, and text crossing nearby rules or signature/table boundaries
+- inspect every page where the rebuilt text was tightened to avoid overflow
+- inspect every page with translated headers or footers
+- inspect every page with arrows, flow charts, or connector lines
 
 Final notes must state:
 
@@ -241,6 +241,7 @@ Final notes must state:
 - whether page count changed
 - whether the rebuilt output is closer to a clean reconstruction or a source-overlay fallback
 - what strategy was chosen and why (`overlay`, `rebuild`, or hybrid)
+- whether overlapping text or other layout defects were found and how they were resolved
 - whether any `custom_override` adjustments were applied after comparison
 
 ## Current Implementation
@@ -254,7 +255,7 @@ This skill now ships its own bundled scripts:
 - `scripts/export_pdf.py`: LibreOffice-based PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
-- `scripts/compare_rendered_pages.py`: side-by-side visual QA helper
+- `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
 - `scripts/translate_blocks_codex.py`: block translation through `codex exec`
 
 Current limitation:
