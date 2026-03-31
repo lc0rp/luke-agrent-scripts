@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babel Copy QA"
+  short_description: "Score translated PDF comparison renders"
+  default_prompt: "Use $babel-copy-qa to review comparison-report.json files and produce deterministic qa-report.json outputs with page scores and remediation notes."
