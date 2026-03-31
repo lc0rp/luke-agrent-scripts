@@ -13,12 +13,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the end-to-end babel-copy workflow.")
     parser.add_argument("input_pdf")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--document-id", help="Stable document identifier for automation loops, for example F1.")
+    parser.add_argument("--cycle-id", help="Stable batch cycle identifier for automation loops.")
+    parser.add_argument("--run-label", help="Human-readable run label, for example initial or optimizer-rerun-1.")
     parser.add_argument("--source-lang", default="French")
     parser.add_argument("--target-lang", default="English")
     parser.add_argument("--pages")
     parser.add_argument("--magnify-factor", type=float, default=2.0)
     parser.add_argument("--dpi", type=int, default=144)
     parser.add_argument("--font-baseline", help="Visual fallback font family override: serif or sans.")
+    parser.add_argument("--ocr-engine", choices=("tesseract", "paddle"), default="tesseract")
+    parser.add_argument("--paddle-python", help="Python interpreter from a separate Paddle OCR env.")
     parser.add_argument("--model")
     parser.add_argument("--batch-size", type=int, default=18)
     parser.add_argument("--skip-compare", action="store_true")
@@ -56,13 +61,14 @@ def recommend_pages(payload: dict) -> list[int]:
     return ordered
 
 
-def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: Path, notes_path: Path) -> None:
+def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: Path, notes_path: Path, ocr_engine: str) -> None:
     font_baseline = extract_payload.get("font_baseline", {})
     lines = [
         "# Babel Copy Check Notes",
         "",
         f"- Final PDF: `{translated_pdf}`",
         f"- Source page count: {extract_payload.get('page_count')}",
+        f"- OCR engine: `{ocr_engine}`",
         f"- Font baseline: `{font_baseline.get('family_class', 'unknown')}` via `{font_baseline.get('source', 'unknown')}`",
         "",
         "## Recommended Visual Checks",
@@ -120,6 +126,10 @@ def main() -> int:
         extract_cmd.extend(["--pages", args.pages])
     if args.font_baseline:
         extract_cmd.extend(["--font-baseline", args.font_baseline])
+    if args.ocr_engine:
+        extract_cmd.extend(["--ocr-engine", args.ocr_engine])
+    if args.paddle_python:
+        extract_cmd.extend(["--paddle-python", args.paddle_python])
     run_step(extract_cmd)
 
     blocks_json = extract_dir / "blocks.json"
@@ -166,14 +176,36 @@ def main() -> int:
 
     extract_payload = json.loads(blocks_json.read_text())
     check_notes = output_dir / "check-notes.md"
-    write_check_notes(extract_payload, output_pdf, compare_dir, check_notes)
+    write_check_notes(extract_payload, output_pdf, compare_dir, check_notes, args.ocr_engine)
 
     manifest = {
+        "schema_version": "1.0",
+        "skill": "babel-copy",
+        "run_id": output_dir.name,
+        "output_dir": str(output_dir),
+        "extract_dir": str(extract_dir),
+        "translated_dir": str(translated_dir),
+        "final_dir": str(final_dir),
+        "compare_dir": str(compare_dir),
         "input_pdf": str(input_pdf),
+        "document_id": args.document_id,
+        "cycle_id": args.cycle_id,
+        "run_label": args.run_label,
+        "source_lang": args.source_lang,
+        "target_lang": args.target_lang,
+        "pages": args.pages,
+        "magnify_factor": args.magnify_factor,
+        "dpi": args.dpi,
+        "font_baseline": args.font_baseline,
+        "ocr_engine": args.ocr_engine,
+        "paddle_python": args.paddle_python,
+        "model": args.model,
+        "batch_size": args.batch_size,
         "blocks_json": str(blocks_json),
         "translated_blocks_json": str(translated_json),
         "final_pdf": str(output_pdf),
         "compare_report": str(compare_dir / "comparison-report.json") if not args.skip_compare else None,
+        "expected_qa_report": str(compare_dir / "qa-report.json") if not args.skip_compare else None,
         "check_notes": str(check_notes),
     }
     manifest_path = output_dir / "run-manifest.json"

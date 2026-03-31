@@ -24,6 +24,7 @@ Use this skill when the translated document should read like a proper target-lan
   - translated text in Markdown or JSON blocks
   - rebuilt rich-layout source, preferably `.html` & `.css`
   - QA renders and notes
+  - `run-manifest.json` with canonical artifact paths for QA and optimizer hand-off
 
 ## Core Rule
 
@@ -103,6 +104,19 @@ Run it to create:
 - page renders for QA and fallback composition
 - `font_baseline` metadata for later fallback-font decisions
 
+OCR backend options:
+
+- default backend is Tesseract
+- use `scripts/extract_document.py --ocr-engine paddle --paddle-python /path/to/.venv-babel-paddle/bin/python` to A/B test PaddleOCR on the same document
+- use separate output directories when comparing OCR backends so manifests and QA renders stay isolated
+- `scripts/setup_paddle_env.sh` creates a dedicated `.venv-babel-paddle` without disturbing the main babel-copy environment
+
+Sentence and paragraph boundary help:
+
+- `syntok` is used when available to add a lightweight sentence-boundary signal during fragment merging
+- install `syntok` into the main babel-copy environment if you want that signal active during extraction
+- it is a helper, not the primary structure engine; geometry, typography, and visual QA still win
+
 ### 2. Translate
 
 Produce:
@@ -159,6 +173,14 @@ Current bundled rebuild path:
 - `scripts/build_final_pdf.py`
 - `scripts/run_babel_copy.py`
 
+For automation loops, prefer calling `scripts/run_babel_copy.py` with:
+
+- `--document-id`
+- `--cycle-id`
+- `--run-label`
+
+These fields are written into `run-manifest.json` so `babel-copy-qa` and `babel-copy-optimizer` can locate the originating run deterministically.
+
 This now supports:
 
 - page-size-aware `.docx` rebuild
@@ -172,6 +194,7 @@ This now supports:
   - translated repeated footers and headers as real translatable blocks
 - end-to-end runner:
   - extract -> `codex exec` translation -> hybrid final PDF build -> rendered comparison report -> check notes
+  - `--ocr-engine tesseract|paddle` with optional `--paddle-python` for a separate PaddleOCR env
 
 It is still not a fully page-faithful legal-document engine, but it now covers the high-leverage structure needed for form-heavy signature pages.
 
@@ -250,11 +273,13 @@ This skill now ships its own bundled scripts:
 
 - `scripts/core.py`: local extraction and composition primitives
 - `scripts/extract_document.py`: source text, block manifest, and asset extraction
+- `scripts/paddle_ocr_bridge.py`: PaddleOCR sidecar used when `--ocr-engine paddle` is selected
 - `scripts/babel_copy_manual.py`: manual extract/apply bootstrap flow
 - `scripts/rebuild_docx.py`: minimal `.docx` rebuild from translated blocks
 - `scripts/export_pdf.py`: LibreOffice-based PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
+- `scripts/setup_paddle_env.sh`: creates a dedicated PaddleOCR virtualenv for A/B runs
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
 - `scripts/translate_blocks_codex.py`: block translation through `codex exec`
 

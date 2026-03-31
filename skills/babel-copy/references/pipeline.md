@@ -128,6 +128,16 @@ Export the rebuilt editable source to PDF, then compare against the original.
 
 Use the comparison step to generate side-by-side page renders for human review.
 
+Automation-oriented runs should also emit a `run-manifest.json` with enough metadata for later stages to find the exact source run. At minimum include:
+
+- `output_dir`
+- `compare_dir`
+- `compare_report`
+- `expected_qa_report`
+- `document_id` when supplied
+- `cycle_id` when supplied
+- `run_label` when supplied
+
 If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through `.docx` first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
 
 QA priorities:

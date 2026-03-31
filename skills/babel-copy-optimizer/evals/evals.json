@@ -1,0 +1,17 @@
+{
+  "skill_name": "babel-copy-optimizer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Take the latest failed unhandled babel-copy qa-report.json under /Users/luke/dev/translate/output, update babel-copy to address the remediation goals, rerun into a fresh timestamped output directory, run QA on the new comparison report, and write optimizer-report.md next to the handled report.",
+      "expected_output": "The agent finds the latest failed unhandled qa-report.json, makes targeted babel-copy changes, uses a new timestamped --output-dir for every rerun, and writes a detailed optimizer-report.md.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Use the failed qa-report.json I provide for a form-heavy amendment PDF, determine whether the issues are pipeline-level or document-local, patch babel-copy only where the behavior should generalize, rerun the pipeline in a new timestamped directory, and include a machine-readable optimizer-report.json because there were multiple remediation items.",
+      "expected_output": "The agent routes remediation items to root causes, avoids overfitting one-off defects into code, reruns babel-copy in a new timestamped directory, and writes both optimizer-report.md and optimizer-report.json.",
+      "files": []
+    }
+  ]
+}

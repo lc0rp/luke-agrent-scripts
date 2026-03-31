@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babel Copy Optimizer"
+  short_description: "Turn failed QA findings into babel-copy fixes and reruns"
+  default_prompt: "Use $babel-copy-optimizer to read the latest unhandled failed qa-report.json, patch babel-copy, rerun into a fresh timestamped output directory, re-QA the result, and write optimizer-report.md."
