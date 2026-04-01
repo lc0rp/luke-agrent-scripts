@@ -1,0 +1,4 @@
+interface:
+  display_name: "Translate In Place"
+  short_description: "Translate PDFs in place while preserving layout"
+  default_prompt: "Use $translate-in-place to produce an in-place translated PDF that preserves layout, headers, footers, logos, images, handwritten marks, dates, and signatures, then run final visual QA."

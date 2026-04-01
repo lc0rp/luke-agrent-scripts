@@ -1,0 +1,158 @@
+# Block Schema
+
+Use a compact JSON structure. Keep it stable across extraction, translation, and rebuild stages.
+
+## Payload
+
+```json
+{
+  "input_pdf": "/abs/path/source.pdf",
+  "page_count": 3,
+  "block_count": 42,
+  "font_baseline": {
+    "family_class": "serif",
+    "pdf_font_name": "Times-Roman",
+    "docx_font_name": "Times New Roman",
+    "source": "visual_override",
+    "reason": "Chosen from visual inspection of representative page renders."
+  },
+  "pages": [
+    {
+      "page_number": 3,
+      "page_type": "mixed",
+      "strategy_hint": "rebuild",
+      "width": 595.08,
+      "height": 841.68,
+      "render_path": "/abs/path/page-renders/page-003.png",
+      "asset_ids": ["p3-a1", "p3-sig1"],
+      "tables": [
+        {
+          "id": "p3-table-1",
+          "bbox": [84.7, 199.9, 531.3, 598.7],
+          "columns": [84.7, 307.0, 531.3],
+          "rows": [199.9, 231.1, 330.8, 362.1, 463.3, 497.5, 598.7],
+          "cells": [
+            {
+              "id": "p3-tp3-table-1-r5-c1",
+              "row_index": 5,
+              "col_index": 1,
+              "bbox": [307.0, 497.5, 531.3, 598.7],
+              "block_ids": ["p3-b12"],
+              "signature_asset_ids": ["p3-sig3"]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "blocks": [],
+  "assets": []
+}
+```
+
+## Block
+
+```json
+{
+  "id": "p1-b12",
+  "page_number": 1,
+  "bbox": [83.2, 431.0, 530.4, 449.2],
+  "text": "A la demande du Régulateur BCEAO...",
+  "role": "paragraph",
+  "align": "left",
+  "style": {
+    "font_size_hint": 10.0,
+    "font_name": "Cambria",
+    "flags": 4,
+    "color": 1521502,
+    "text_fill_color": "#17387E",
+    "bold": false,
+    "italic": false
+  },
+  "list": null,
+  "table": {
+    "table_id": "p3-table-1",
+    "cell_id": "p3-tp3-table-1-r5-c1",
+    "row_index": 5,
+    "col_index": 1
+  },
+  "keep_original": false,
+  "artifact_risk": "low",
+  "custom_override": {
+    "bbox": {
+      "x": "+6",
+      "w": "+24"
+    },
+    "align": "left",
+    "style": {
+      "font_size_hint": "+0.8",
+      "color": 1521502,
+      "text_fill_color": "#17375E"
+    }
+  }
+}
+```
+
+## Asset
+
+```json
+{
+  "id": "p3-sig3",
+  "page_number": 3,
+  "kind": "signature_crop",
+  "origin": "page_render",
+  "bbox": [318.4, 526.7, 474.2, 577.9],
+  "path": "/abs/path/assets/page-003-table-p3-table-1-cell-5-1-signature.png",
+  "image_size_px": [311, 103],
+  "placement": {
+    "mode": "page_absolute",
+    "table_id": "p3-table-1",
+    "cell_id": "p3-tp3-table-1-r5-c1"
+  }
+}
+```
+
+## Roles
+
+- `title`
+- `heading`
+- `paragraph`
+- `list_item`
+- `table_cell`
+- `form_label`
+- `header`
+- `footer`
+- `signature_label`
+- `artifact`
+
+## Notes
+
+- `font_baseline` is a document-level fallback decision. Set it from visual inspection first whenever possible.
+- If `font_baseline` conflicts with weak extracted font metadata or a source font that is not embedded / not reusable, the visual baseline should win.
+- `font_baseline.family_class` should be `serif` or `sans`.
+- PDF overlay fallback mapping is `serif -> Times-Roman`, `sans -> helv`.
+- DOCX rebuild fallback mapping is `serif -> Times New Roman`, `sans -> Arial`.
+- `header` and `footer` text should be translated unless they are purely non-linguistic marks.
+- `keep_original: true` is for non-text or non-translatable visual elements, not for repeated boilerplate text.
+- `style.font_name`, `style.flags`, `style.color`, and `style.text_fill_color` are block-level summaries for native text only, not full per-span style runs.
+- OCR-derived blocks should serialize those native-style summary fields as `null`.
+- Post-process tuning should be added to `translated_blocks.json`, not the extracted `blocks.json`.
+- `custom_override` is optional and is applied only at render time.
+- For numeric fields, a string like `"+4"` or `"-1.5"` means a relative delta; a numeric literal means absolute replacement.
+- `custom_override.bbox.x` / `y` shift the whole block, while `w` / `h` grow or shrink its width or height.
+- `custom_override.bbox.x0` / `y0` / `x1` / `y1` can override or delta individual edges directly.
+- Overlay pages honor bbox nudges, font-size changes, alignment overrides, color overrides, and text changes. DOCX rebuild pages honor text/style/alignment overrides, but not absolute PDF positioning with the same fidelity.
+
+## Keep Original
+
+Set `keep_original: true` for:
+
+- signatures
+- handwritten names or dates
+- seals and stamps
+- non-text decorative or legal marks
+- diagram arrows or connectors that are hard to reconstruct
+
+## Translation Notes
+
+Store translation-specific data separately from source extraction. Do not overwrite the source block text in place until you produce `translated_blocks.json`.

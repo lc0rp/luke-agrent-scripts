@@ -220,6 +220,7 @@ Requirements:
 - Preserve legal/compliance meaning accurately.
 - Keep numbering stable.
 - Preserve entity names, emails, addresses, phone numbers, regulator acronyms, product names, and software/vendor names unless they obviously need translation.
+- Preserve all-caps organization names and signature-block party names verbatim unless the source text explicitly translates them.
 - Translate headers, footers, table headers, labels, captions, and body text.
 - Keep terminology consistent across the batch.
 - Do not explain your work.

@@ -46,6 +46,19 @@ If repo docs disagree with this file, follow repo docs.
 - If unsure, read more code/docs first; ask only when still blocked.
 - Web search early for unstable or current facts.
 - Quote exact errors.
+- Supply chain safety is non-negotiable.
+- Never use direct `pip install`; use `uv` instead.
+- For Python installs and upgrades, always exclude packages released within the past 14 days.
+- Prefer global defaults such as `UV_EXCLUDE_NEWER` in the shell profile and `exclude-newer = "14 days"` in `~/.config/uv/uv.toml`.
+- For one-off Python commands, use `uv pip install --exclude-newer "$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=14)).strftime(\"%Y-%m-%dT%H:%M:%SZ\"))')" <package>`.
+- For `npm install`, always use `--before` with a cutoff at least 14 days old. Example: `npm install --before="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=14)).strftime(\"%Y-%m-%dT%H:%M:%SZ\"))')"` or an equivalent shell wrapper.
+- Always pin exact dependency versions when adding or changing dependencies. Do not use broad or open-ended version ranges unless explicitly approved.
+- Always update and review the lockfile when dependencies change, and keep lockfile changes in the same change set.
+- For Python requirements files, prefer hashes when practical.
+- Always check dependency scores with the `depscore` tool before adding a new dependency.
+- If a dependency score is low, prefer an alternative library or write the code yourself.
+- If you are unsure how to judge a dependency score, escalate for experienced review.
+- Dependency review must include actual imports in the code, not just `pyproject.toml`, `package.json`, or other manifest files.
 - Add regression tests when it fits.
 - Prefer red/green/refactor TDD for bugs, regressions, and risky behavior changes when practical.
 - Do not turn tests green with lazy stubs, placeholders, bypasses, or mock-heavy fake implementations unless that scope is explicitly requested.

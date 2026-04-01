@@ -37,18 +37,30 @@ Use the exact schema in `references/qa-report-schema.md`.
 Use this sequence exactly:
 
 1. `python scripts/run_babel_copy_qa.py prepare <comparison-report-or-dir>...`
-2. Review every page image listed in each scaffolded `qa-report.json`
-3. Fill the page fields in two passes:
+2. Review every page image listed in each scaffolded `qa-report.json` enough to route applicability and dispatch work
+3. For every page, dispatch one sub-agent per checklist check using the page image and that check's definition only
+4. Fill the page fields in two passes:
    - defect hunt
    - checklist scoring
-4. For every page that would otherwise pass, run a challenger pass
-5. `python scripts/run_babel_copy_qa.py finalize <comparison-report-or-dir>...`
+5. For every page that would otherwise pass, run a challenger pass
+6. `python scripts/run_babel_copy_qa.py finalize <comparison-report-or-dir>...`
 
 The script validates the contract, computes scores, and rejects generic evidence.
+
+The main agent is the sole recorder. Sub-agents return structured findings for one page and one check; the main agent writes those results into the canonical `qa-report.json`.
 
 ## Two-Pass Review
 
 Read `references/checklist.md` before grading pages.
+
+Sub-agent isolation is mandatory for checklist scoring:
+
+- dispatch one sub-agent per page per checklist check
+- pass each sub-agent only the page image path, page number, `mean_diff`, the assigned check id and check definition, and the minimum applicability guidance needed for that check
+- do not pass other check results into a check-review sub-agent
+- do not let a sub-agent edit `qa-report.json`
+- the main agent records the returned result, evidence, remediation, and any issue candidates in the canonical report
+- if a sub-agent reports ambiguity, the main agent should record the most conservative outcome supported by the evidence and use the challenger/manual-review path when needed
 
 ### Pass 1: Defect Hunt
 
@@ -66,11 +78,13 @@ Record hotspot notes in `hotspot_reviews` with page-region-specific observations
 
 If you see a real defect, add it to `issues` immediately and write `defect_hunt_summary`.
 
+The main agent owns the defect hunt summary, hotspot coverage, and issue normalization. Sub-agents may suggest issue entries, but only the main agent merges them into the page record.
+
 ### Pass 2: Checklist Scoring
 
 Only after the defect hunt:
 
-- fill every checklist item
+- fill every checklist item from the corresponding page-check sub-agent result
 - use `pass`, `fail`, or `not_applicable` only
 - every `pass` and `fail` must include specific evidence
 - every `fail` must include concrete remediation
@@ -98,6 +112,8 @@ If the challenger flags a page:
 - set the relevant failed checks if the defect is clear
 - otherwise let finalization mark the page `review_status = needs_review`
 - overall `status` must remain `fail` so downstream optimization does not treat it as complete
+
+Run the challenger as a separate sub-agent. Give it the page image and page-level context, but not the hidden chain-of-thought or broad session history. It may see the aggregated page findings when that is necessary to attack the current tentative pass decision.
 
 ## Checklist Discipline
 
@@ -152,27 +168,50 @@ Escalate to `gpt-5.4` only when one of these is true:
 
 ## Sub-Agent Pattern
 
-Use sub-agents only when the batch is large enough to justify coordination.
+Sub-agents are mandatory for checklist scoring.
 
-Good split points:
+Required split:
 
-- one sub-agent per `comparison-report.json`
-- one sub-agent per page range for documents longer than 12 pages
+- one sub-agent per page per checklist check
+- one challenger sub-agent for every page that would otherwise pass
 
-Use `gpt-5.4-mini` sub-agents for page inspection when:
+Recommended sub-agent model:
 
-- reports are independent
-- page ownership is disjoint
-- the main agent remains the sole aggregator
+- `gpt-5.4-mini` for page-check inspection
+- `gpt-5.4` only when a specific check is materially ambiguous or high-risk
 
 Keep the main agent responsible for:
 
 - preparing scaffolds
-- merging page findings into the canonical `qa-report.json`
+- reviewing each page enough to route applicability and dispatch work
+- merging page-check findings into the canonical `qa-report.json`
+- writing hotspot reviews, `defect_hunt_summary`, page summaries, and remediation summaries
 - running `finalize`
 - preserving baton metadata for the optimizer
 
-Do not let multiple agents edit the same `qa-report.json` concurrently.
+Do not let sub-agents edit `qa-report.json` at all. The main agent is the only writer.
+
+Dispatch contract for each page-check sub-agent:
+
+- input:
+  - page number
+  - page image path
+  - `mean_diff`
+  - assigned check id and check definition
+  - concise applicability guidance for that check
+- output:
+  - `result`: `pass`, `fail`, or `not_applicable`
+  - check-specific evidence
+  - remediation when `result = fail`
+  - optional issue candidate with severity, title, evidence, remediation, and `check_ids`
+  - short note if the check is ambiguous and should drive conservative aggregation
+
+Aggregation rules for the main agent:
+
+- record each sub-agent result into the matching check object
+- deduplicate issue candidates while preserving check coverage
+- prefer the stricter supported outcome when check-level findings conflict
+- if evidence is insufficient or ambiguous, bias toward `fail` or challenger/manual review rather than `pass`
 
 ## Mean Diff
 

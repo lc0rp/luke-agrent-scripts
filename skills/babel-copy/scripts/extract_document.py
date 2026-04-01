@@ -3,18 +3,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
 import os
-from pathlib import Path
 import re
-from statistics import median
 import subprocess
 import tempfile
+from collections import defaultdict
+from pathlib import Path
+from statistics import median
 
 import fitz
 import numpy as np
-import pytesseract
 from PIL import Image
+
+try:
+    from syntok import segmenter as syntok_segmenter
+except ImportError:
+    syntok_segmenter = None
 
 from core import (
     build_font_baseline,
@@ -25,10 +29,11 @@ from core import (
     font_baseline_from_payload,
     infer_alignment,
     normalize_font_family_class,
+    normalize_ocr_engine,
+    ocr_image_to_string,
     parse_page_selection,
     split_leading_marker,
 )
-
 
 _FRAGMENT_MERGE_LLM_CACHE: dict[str, bool] = {}
 
@@ -36,18 +41,33 @@ _FRAGMENT_MERGE_LLM_CACHE: dict[str, bool] = {}
 def region_style_signature(region) -> tuple[str, tuple[float, float, float]]:
     return (
         str(getattr(region, "render_font_name", "") or ""),
-        tuple(round(float(value), 3) for value in getattr(region, "text_color", (0.0, 0.0, 0.0))),
+        tuple(
+            round(float(value), 3)
+            for value in getattr(region, "text_color", (0.0, 0.0, 0.0))
+        ),
     )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract source text, blocks, and assets for babel-copy")
+    parser = argparse.ArgumentParser(
+        description="Extract source text, blocks, and assets for babel-copy"
+    )
     parser.add_argument("input_pdf")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--pages")
     parser.add_argument("--magnify-factor", type=float, default=2.0)
     parser.add_argument("--dpi", type=int, default=144)
-    parser.add_argument("--font-baseline", help="Visual fallback font family override: serif or sans.")
+    parser.add_argument(
+        "--font-baseline", help="Visual fallback font family override: serif or sans."
+    )
+    parser.add_argument(
+        "--ocr-engine",
+        choices=("tesseract", "paddle"),
+        default=normalize_ocr_engine(None),
+    )
+    parser.add_argument(
+        "--paddle-python", help="Python interpreter from a separate Paddle OCR env."
+    )
     return parser.parse_args()
 
 
@@ -78,12 +98,21 @@ def merge_regions(regions):
         force_break = (
             region.source == "native"
             and current["source"] == "native"
-            and should_force_native_line_break(current["regions"][-1], region, next_region)
+            and should_force_native_line_break(
+                current["regions"][-1], region, next_region
+            )
         )
         current_is_bullet_only = is_bullet_only_text(current["regions"][-1].text)
         region_is_bullet_only = is_bullet_only_text(region.text)
         mergeable_direction = not (region_is_bullet_only and not current_is_bullet_only)
-        if same_align and close_y and similar_x and similar_style and mergeable_direction and not force_break:
+        if (
+            same_align
+            and close_y
+            and similar_x
+            and similar_style
+            and mergeable_direction
+            and not force_break
+        ):
             current["regions"].append(region)
             current["rect"] = current_rect | rect
         else:
@@ -121,7 +150,10 @@ def role_for_text(text: str) -> str:
 def is_probable_artifact(text: str) -> bool:
     alpha_count = sum(ch.isalpha() for ch in text)
     digit_count = sum(ch.isdigit() for ch in text)
-    weird_count = sum(not ch.isalnum() and not ch.isspace() and ch not in "•-–—()/:,.;&@+'\"" for ch in text)
+    weird_count = sum(
+        not ch.isalnum() and not ch.isspace() and ch not in "•-–—()/:,.;&@+'\""
+        for ch in text
+    )
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if alpha_count == 0 and len(text) <= 8:
         return True
@@ -129,7 +161,11 @@ def is_probable_artifact(text: str) -> bool:
         return True
     if len(text) <= 8 and digit_count == 0 and weird_count >= max(2, alpha_count):
         return True
-    if lines and all(len(line) <= 2 for line in lines) and sum(sum(ch.isalpha() for ch in line) for line in lines) <= 3:
+    if (
+        lines
+        and all(len(line) <= 2 for line in lines)
+        and sum(sum(ch.isalpha() for ch in line) for line in lines) <= 3
+    ):
         return True
     return False
 
@@ -194,10 +230,14 @@ def is_body_like_line(text: str) -> bool:
     return len(stripped.split()) >= 5 and lower >= 1
 
 
-def should_force_native_line_break(previous_region, current_region, next_region=None) -> bool:
+def should_force_native_line_break(
+    previous_region, current_region, next_region=None
+) -> bool:
     previous_text = clean_text(getattr(previous_region, "text", ""))
     current_text = clean_text(getattr(current_region, "text", ""))
-    next_text = clean_text(getattr(next_region, "text", "")) if next_region is not None else ""
+    next_text = (
+        clean_text(getattr(next_region, "text", "")) if next_region is not None else ""
+    )
     if not previous_text or not current_text:
         return False
 
@@ -210,20 +250,87 @@ def should_force_native_line_break(previous_region, current_region, next_region=
     prev_size = region_font_size(previous_region)
     curr_size = region_font_size(current_region)
     next_size = region_font_size(next_region) if next_region is not None else curr_size
-    size_contrast = abs(curr_size - prev_size) >= 0.75 or abs(curr_size - next_size) >= 0.75
-    isolated = gap_before >= max(4.5, curr_size * 0.35) or gap_after >= max(4.5, curr_size * 0.35)
+    size_contrast = (
+        abs(curr_size - prev_size) >= 0.75 or abs(curr_size - next_size) >= 0.75
+    )
+    isolated = gap_before >= max(4.5, curr_size * 0.35) or gap_after >= max(
+        4.5, curr_size * 0.35
+    )
 
     if is_label_like_line(current_text):
-        if is_body_like_line(previous_text) and (isolated or size_contrast or previous_text.endswith(":") or is_body_like_line(next_text)):
+        if is_body_like_line(previous_text) and (
+            isolated
+            or size_contrast
+            or previous_text.endswith(":")
+            or is_body_like_line(next_text)
+        ):
             return True
         if previous_text.endswith(":") and (isolated or is_body_like_line(next_text)):
             return True
 
     if is_label_like_line(previous_text) and is_body_like_line(current_text):
-        if previous_text.endswith(":") or gap_before >= max(4.5, prev_size * 0.35) or size_contrast:
+        if (
+            previous_text.endswith(":")
+            or gap_before >= max(4.5, prev_size * 0.35)
+            or size_contrast
+        ):
             return True
 
     return False
+
+
+def syntok_sentences(text: str) -> list[str]:
+    if syntok_segmenter is None:
+        return []
+    stripped = clean_text(text)
+    if not stripped:
+        return []
+    try:
+        sentences: list[str] = []
+        for paragraph in syntok_segmenter.process(stripped):
+            for sentence in paragraph:
+                values = [
+                    token.value
+                    for token in sentence
+                    if getattr(token, "value", "").strip()
+                ]
+                if values:
+                    sentences.append(" ".join(values))
+        return sentences
+    except Exception:
+        return []
+
+
+def syntok_prefers_merge(previous_text: str, current_text: str) -> bool:
+    if syntok_segmenter is None:
+        return False
+    current_clean = clean_text(current_text)
+    if not current_clean or is_label_like_line(current_clean):
+        return False
+    combined = clean_text(f"{previous_text} {current_clean}")
+    sentences = syntok_sentences(combined)
+    if len(sentences) != 1:
+        return False
+    if current_clean[:1].islower():
+        return True
+    if previous_text.endswith((",", "(", "/", "-")):
+        return True
+    previous_last_word = clean_text(previous_text).split()[-1].lower()
+    return previous_last_word in {
+        "de",
+        "du",
+        "des",
+        "le",
+        "la",
+        "les",
+        "d",
+        "et",
+        "of",
+        "the",
+        "and",
+        "to",
+        "for",
+    }
 
 
 def groups_from_indices(values: list[int], max_gap: int = 1) -> list[tuple[int, int]]:
@@ -284,9 +391,15 @@ def line_payload(region) -> dict:
     return {
         "bbox": rect_to_list(fitz.Rect(region.bbox)),
         "span_styles": [dict(span) for span in region.span_styles],
-        "dominant_font_size": round(float(region.dominant_font_size), 2) if region.dominant_font_size is not None else None,
-        "max_font_size": round(float(region.max_font_size), 2) if region.max_font_size is not None else None,
-        "baseline_y": round(float(region.baseline_y), 2) if region.baseline_y is not None else None,
+        "dominant_font_size": round(float(region.dominant_font_size), 2)
+        if region.dominant_font_size is not None
+        else None,
+        "max_font_size": round(float(region.max_font_size), 2)
+        if region.max_font_size is not None
+        else None,
+        "baseline_y": round(float(region.baseline_y), 2)
+        if region.baseline_y is not None
+        else None,
     }
 
 
@@ -340,8 +453,16 @@ def color_to_hex(value) -> str | None:
 def block_font_size_hint(block: dict) -> float:
     native_lines = block.get("_native_lines", [])
     if native_lines:
-        dominant_sizes = [float(line["dominant_font_size"]) for line in native_lines if line.get("dominant_font_size") is not None]
-        max_sizes = [float(line["max_font_size"]) for line in native_lines if line.get("max_font_size") is not None]
+        dominant_sizes = [
+            float(line["dominant_font_size"])
+            for line in native_lines
+            if line.get("dominant_font_size") is not None
+        ]
+        max_sizes = [
+            float(line["max_font_size"])
+            for line in native_lines
+            if line.get("max_font_size") is not None
+        ]
         role = str(block.get("role", ""))
         if role in {"heading", "title", "form_label"}:
             candidates = max_sizes or dominant_sizes
@@ -350,7 +471,9 @@ def block_font_size_hint(block: dict) -> float:
         candidates = dominant_sizes or max_sizes
         if candidates:
             return round(median(candidates), 2)
-    hints = [float(value) for value in block.get("_font_size_hints", []) if value is not None]
+    hints = [
+        float(value) for value in block.get("_font_size_hints", []) if value is not None
+    ]
     if hints:
         return round(sum(hints) / len(hints), 2)
     return float(block.get("style", {}).get("font_size_hint", 10.0))
@@ -359,7 +482,9 @@ def block_font_size_hint(block: dict) -> float:
 def summarize_block_style(block: dict) -> dict:
     existing = dict(block.get("style", {}))
     native_lines = block.get("_native_lines", [])
-    font_name = dominant_style_value(native_lines, "font_name") if native_lines else None
+    font_name = (
+        dominant_style_value(native_lines, "font_name") if native_lines else None
+    )
     flags = dominant_style_value(native_lines, "flags") if native_lines else None
     color = dominant_style_value(native_lines, "color") if native_lines else None
     return {
@@ -380,7 +505,9 @@ def block_alignment_from_native_lines(block: dict, page_rect: fitz.Rect) -> str:
     text = clean_text(str(block.get("text", "")))
     line_count = block_line_count(block)
     text_length = len(text)
-    centered = abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    centered = (
+        abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    )
     narrow = rect.width < page_rect.width * 0.55
 
     if role == "paragraph":
@@ -472,7 +599,10 @@ def trim_duplicate_prefix(current_text: str, previous_text: str) -> str:
 
 
 def block_line_count(block: dict) -> int:
-    return max(1, len([line for line in str(block.get("text", "")).splitlines() if line.strip()]))
+    return max(
+        1,
+        len([line for line in str(block.get("text", "")).splitlines() if line.strip()]),
+    )
 
 
 def block_is_ocr(block: dict) -> bool:
@@ -503,7 +633,9 @@ def page_has_toc_title(page_blocks: list[dict]) -> bool:
     return False
 
 
-def block_alignment_from_ocr_layout(block: dict, page_blocks: list[dict], page_rect: fitz.Rect, toc_page: bool) -> str:
+def block_alignment_from_ocr_layout(
+    block: dict, page_blocks: list[dict], page_rect: fitz.Rect, toc_page: bool
+) -> str:
     rect = fitz.Rect(block["bbox"])
     role = str(block.get("role", ""))
     text = clean_text(str(block.get("text", "")))
@@ -521,7 +653,9 @@ def block_alignment_from_ocr_layout(block: dict, page_blocks: list[dict], page_r
     if role in {"header", "footer"}:
         return infer_alignment(rect, page_rect)
 
-    centered = abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    centered = (
+        abs((rect.x0 + rect.x1) / 2 - (page_rect.width / 2)) < page_rect.width * 0.06
+    )
     narrow = rect.width < page_rect.width * 0.55
 
     if role in {"heading", "title", "form_label"}:
@@ -553,7 +687,9 @@ def finalize_block_layout(page_blocks: list[dict], page_rect: fitz.Rect) -> None
         if block.get("_force_left_align") or block.get("role") == "list_item":
             block["align"] = "left"
         elif block_is_ocr(block):
-            block["align"] = block_alignment_from_ocr_layout(block, page_blocks, page_rect, toc_page)
+            block["align"] = block_alignment_from_ocr_layout(
+                block, page_blocks, page_rect, toc_page
+            )
         elif block.get("source") == "native":
             block["align"] = block_alignment_from_native_lines(block, page_rect)
         render_baseline_y = block_render_baseline(block)
@@ -578,13 +714,18 @@ def classify_asset_kind(rect: fitz.Rect, page_rect: fitz.Rect) -> str:
     return "embedded_image"
 
 
-def export_page_assets(page: fitz.Page, page_number: int, assets_dir: Path) -> list[dict]:
+def export_page_assets(
+    page: fitz.Page, page_number: int, assets_dir: Path
+) -> list[dict]:
     exported: list[dict] = []
     for image_index, image in enumerate(page.get_images(full=True)):
         rects = page.get_image_rects(image[0])
         for rect_index, rect in enumerate(rects):
             clipped = page.get_pixmap(clip=rect, dpi=150, alpha=False)
-            asset_path = assets_dir / f"page-{page_number:03d}-image-{image_index:02d}-{rect_index:02d}.png"
+            asset_path = (
+                assets_dir
+                / f"page-{page_number:03d}-image-{image_index:02d}-{rect_index:02d}.png"
+            )
             asset_path.write_bytes(clipped.tobytes("png"))
             exported.append(
                 {
@@ -635,7 +776,9 @@ def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
 
     vertical_runs = longest_dark_runs(dark, axis=0)
     vertical_threshold = max(42, int(height * 0.06))
-    vertical_indices = [idx for idx, run in enumerate(vertical_runs) if run >= vertical_threshold]
+    vertical_indices = [
+        idx for idx, run in enumerate(vertical_runs) if run >= vertical_threshold
+    ]
     vertical_groups = groups_from_indices(vertical_indices, max_gap=2)
     if len(vertical_groups) < 3:
         return []
@@ -670,7 +813,11 @@ def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
         sub_dark = dark[:, x0:x1]
         horizontal_runs = longest_dark_runs(sub_dark, axis=1)
         horizontal_threshold = max(54, int((x1 - x0) * 0.45))
-        horizontal_indices = [idx for idx, run in enumerate(horizontal_runs) if run >= horizontal_threshold]
+        horizontal_indices = [
+            idx
+            for idx, run in enumerate(horizontal_runs)
+            if run >= horizontal_threshold
+        ]
         horizontal_groups = groups_from_indices(horizontal_indices, max_gap=2)
         if len(horizontal_groups) < 3:
             continue
@@ -689,9 +836,18 @@ def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
     if not table_candidates:
         return []
 
-    best = max(table_candidates, key=lambda item: (item["score"], item["bbox"][2] - item["bbox"][0]))
-    columns_pt = [round(page_px_to_pt(value, width, page_rect.width), 2) for value in best["columns"]]
-    rows_pt = [round(page_px_to_pt(value, height, page_rect.height), 2) for value in best["rows"]]
+    best = max(
+        table_candidates,
+        key=lambda item: (item["score"], item["bbox"][2] - item["bbox"][0]),
+    )
+    columns_pt = [
+        round(page_px_to_pt(value, width, page_rect.width), 2)
+        for value in best["columns"]
+    ]
+    rows_pt = [
+        round(page_px_to_pt(value, height, page_rect.height), 2)
+        for value in best["rows"]
+    ]
     return [
         {
             "id": "table-1",
@@ -708,7 +864,12 @@ def build_table_cells(page_number: int, table: dict) -> list[dict]:
     rows = table["rows"]
     for row_index in range(len(rows) - 1):
         for col_index in range(len(columns) - 1):
-            bbox = [columns[col_index], rows[row_index], columns[col_index + 1], rows[row_index + 1]]
+            bbox = [
+                columns[col_index],
+                rows[row_index],
+                columns[col_index + 1],
+                rows[row_index + 1],
+            ]
             cells.append(
                 {
                     "id": f"p{page_number}-t{table['id']}-r{row_index}-c{col_index}",
@@ -722,7 +883,9 @@ def build_table_cells(page_number: int, table: dict) -> list[dict]:
     return cells
 
 
-def merge_paragraph_fragments(page_blocks: list[dict], llm_decisions: set[tuple[str, str]] | None = None) -> list[dict]:
+def merge_paragraph_fragments(
+    page_blocks: list[dict], llm_decisions: set[tuple[str, str]] | None = None
+) -> list[dict]:
     if not page_blocks:
         return page_blocks
     llm_decisions = llm_decisions or set()
@@ -733,7 +896,10 @@ def merge_paragraph_fragments(page_blocks: list[dict], llm_decisions: set[tuple[
             merged.append(block)
             continue
         previous = merged[-1]
-        if should_merge_fragment(previous, block) or (str(previous["id"]), str(block["id"])) in llm_decisions:
+        if (
+            should_merge_fragment(previous, block)
+            or (str(previous["id"]), str(block["id"])) in llm_decisions
+        ):
             previous["text"] = clean_text(f"{previous['text']}\n{block['text']}")
             previous["bbox"] = [
                 round(min(previous["bbox"][0], block["bbox"][0]), 2),
@@ -743,8 +909,12 @@ def merge_paragraph_fragments(page_blocks: list[dict], llm_decisions: set[tuple[
             ]
             previous["role"] = role_for_text(previous["text"])
             previous["style"]["bold"] = False
-            previous.setdefault("_font_size_hints", []).extend(block.get("_font_size_hints", []))
-            previous.setdefault("_native_lines", []).extend(block.get("_native_lines", []))
+            previous.setdefault("_font_size_hints", []).extend(
+                block.get("_font_size_hints", [])
+            )
+            previous.setdefault("_native_lines", []).extend(
+                block.get("_native_lines", [])
+            )
             continue
         merged.append(block)
     return merged
@@ -767,8 +937,12 @@ def attach_leading_bullets(page_blocks: list[dict]) -> list[dict]:
                 candidates.append(ordered[index + 1])
             target = None
             for candidate in candidates:
-                same_line = abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 3.5
-                indented_right = float(candidate["bbox"][0]) >= float(block["bbox"][2]) - 2.0
+                same_line = (
+                    abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 3.5
+                )
+                indented_right = (
+                    float(candidate["bbox"][0]) >= float(block["bbox"][2]) - 2.0
+                )
                 if same_line and indented_right and not candidate.get("table"):
                     target = candidate
                     break
@@ -783,8 +957,12 @@ def attach_leading_bullets(page_blocks: list[dict]) -> list[dict]:
                     round(max(float(block["bbox"][3]), float(target["bbox"][3])), 2),
                 ]
                 target["role"] = "list_item"
-                target.setdefault("_font_size_hints", []).extend(block.get("_font_size_hints", []))
-                target.setdefault("_native_lines", []).extend(block.get("_native_lines", []))
+                target.setdefault("_font_size_hints", []).extend(
+                    block.get("_font_size_hints", [])
+                )
+                target.setdefault("_native_lines", []).extend(
+                    block.get("_native_lines", [])
+                )
                 index += 1
                 continue
         merged.append(block)
@@ -800,7 +978,9 @@ def mark_list_items_from_marker_artifacts(page_blocks: list[dict]) -> None:
         if not is_marker_artifact_text(str(block.get("text", ""))):
             continue
         for candidate in ordered[index + 1 :]:
-            same_line = abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 4.0
+            same_line = (
+                abs(float(block["bbox"][1]) - float(candidate["bbox"][1])) <= 4.0
+            )
             if not same_line:
                 if float(candidate["bbox"][1]) > float(block["bbox"][3]) + 6.0:
                     break
@@ -838,7 +1018,11 @@ def mark_two_column_rows(page_blocks: list[dict]) -> None:
 
 
 def mark_textual_table_like_rows(page_blocks: list[dict]) -> None:
-    table_like_blocks = [block for block in page_blocks if block_is_ocr(block) and "|" in str(block.get("text", ""))]
+    table_like_blocks = [
+        block
+        for block in page_blocks
+        if block_is_ocr(block) and "|" in str(block.get("text", ""))
+    ]
     if len(table_like_blocks) < 2:
         return
     for block in table_like_blocks:
@@ -858,8 +1042,11 @@ def block_x_overlap_ratio(left: dict, right: dict) -> float:
 def build_textual_tables(page_number: int, page_blocks: list[dict]) -> list[dict]:
     candidates = [
         block
-        for block in sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
-        if block_is_ocr(block) and (block.get("role") == "table_cell" or "|" in str(block.get("text", "")))
+        for block in sorted(
+            page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0])
+        )
+        if block_is_ocr(block)
+        and (block.get("role") == "table_cell" or "|" in str(block.get("text", "")))
     ]
     if len(candidates) < 2:
         return []
@@ -980,10 +1167,16 @@ def merge_inline_sequence(blocks: list[dict]) -> dict:
     ]
     merged["role"] = role_for_text(merged["text"])
     merged["keep_original"] = False
-    merged["_font_size_hints"] = [float(value) for block in blocks for value in block.get("_font_size_hints", [])]
-    merged["_native_lines"] = [line for block in blocks for line in block.get("_native_lines", [])]
+    merged["_font_size_hints"] = [
+        float(value) for block in blocks for value in block.get("_font_size_hints", [])
+    ]
+    merged["_native_lines"] = [
+        line for block in blocks for line in block.get("_native_lines", [])
+    ]
     merged["style"] = dict(merged.get("style", {}))
-    merged["style"]["bold"] = any(bool(block.get("style", {}).get("bold")) for block in blocks)
+    merged["style"]["bold"] = any(
+        bool(block.get("style", {}).get("bold")) for block in blocks
+    )
     return merged
 
 
@@ -992,7 +1185,11 @@ def merge_inline_row_fragments(page_blocks: list[dict]) -> list[dict]:
         return page_blocks
     ordered = sorted(
         page_blocks,
-        key=lambda item: (round(float(item["bbox"][1]), 2), block_visual_x0(item), float(item["bbox"][0])),
+        key=lambda item: (
+            round(float(item["bbox"][1]), 2),
+            block_visual_x0(item),
+            float(item["bbox"][0]),
+        ),
     )
     merged_rows: list[dict] = []
     row: list[dict] = []
@@ -1001,7 +1198,14 @@ def merge_inline_row_fragments(page_blocks: list[dict]) -> list[dict]:
     def flush_row(items: list[dict]) -> None:
         if not items:
             return
-        visual_order = sorted(items, key=lambda item: (block_visual_x0(item), float(item["bbox"][0]), float(item["bbox"][2])))
+        visual_order = sorted(
+            items,
+            key=lambda item: (
+                block_visual_x0(item),
+                float(item["bbox"][0]),
+                float(item["bbox"][2]),
+            ),
+        )
         index = 0
         while index < len(visual_order):
             current = visual_order[index]
@@ -1057,7 +1261,11 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
         return False
     previous_style = block_native_style_signature(previous)
     current_style = block_native_style_signature(current)
-    if previous_style is not None and current_style is not None and previous_style != current_style:
+    if (
+        previous_style is not None
+        and current_style is not None
+        and previous_style != current_style
+    ):
         return False
     if block_is_ocr(previous) and block_is_ocr(current):
         previous_rect = fitz.Rect(previous["bbox"])
@@ -1073,13 +1281,22 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
             str(previous.get("role")) == "paragraph"
             and str(current.get("role")) == "paragraph"
             and gap <= 12
-            and (abs(current_rect.x0 - previous_rect.x0) <= 10 or (current_rect.x0 >= previous_rect.x0 + 18 and current_rect.x1 <= previous_rect.x1 + 6))
+            and (
+                abs(current_rect.x0 - previous_rect.x0) <= 10
+                or (
+                    current_rect.x0 >= previous_rect.x0 + 18
+                    and current_rect.x1 <= previous_rect.x1 + 6
+                )
+            )
         ):
             if previous_text[-1:].isalnum() and current_text[:1].islower():
                 return True
             if "|" in previous_text or "|" in current_text:
                 return True
-            if previous_rect.width >= current_rect.width * 1.25 and len(current_text) <= 96:
+            if (
+                previous_rect.width >= current_rect.width * 1.25
+                and len(current_text) <= 96
+            ):
                 return True
     if abs(float(current["bbox"][0]) - float(previous["bbox"][0])) > 24:
         return False
@@ -1088,8 +1305,24 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     if previous_text.endswith((".", ":", ";", "!", "?")):
         return False
     previous_last_word = previous_text.split()[-1].lower()
-    bridge_words = {"de", "du", "des", "le", "la", "les", "d", "et", "of", "the", "and", "to", "for"}
+    bridge_words = {
+        "de",
+        "du",
+        "des",
+        "le",
+        "la",
+        "les",
+        "d",
+        "et",
+        "of",
+        "the",
+        "and",
+        "to",
+        "for",
+    }
     if previous_last_word in bridge_words:
+        return True
+    if syntok_prefers_merge(previous_text, current_text):
         return True
     if len(current_text) <= 32 and (current_text.isupper() or " " not in current_text):
         return True
@@ -1097,7 +1330,7 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
 
 
 def llm_fragment_merge_enabled() -> bool:
-    value = os.environ.get("BABEL_COPY_ENABLE_LLM_FRAGMENT_MERGE", "").strip().lower()
+    value = os.environ.get("BABEL_COPY_ENABLE_LLM_FRAGMENT_MERGE", "1").strip().lower()
     return value in {"1", "true", "yes", "on"}
 
 
@@ -1120,7 +1353,10 @@ def text_is_merge_artifact_candidate(text: str) -> bool:
     if is_probable_artifact(stripped):
         return False
     alpha_count = sum(ch.isalpha() for ch in stripped)
-    weird_count = sum(not ch.isalnum() and not ch.isspace() and ch not in "•-–—()/:,.;&@+'\"" for ch in stripped)
+    weird_count = sum(
+        not ch.isalnum() and not ch.isspace() and ch not in "•-–—()/:,.;&@+'\""
+        for ch in stripped
+    )
     if alpha_count <= 2 and weird_count >= max(2, alpha_count):
         return False
     return True
@@ -1133,7 +1369,9 @@ def is_ambiguous_fragment_pair(previous: dict, current: dict) -> bool:
         return False
     previous_text = clean_text(str(previous.get("text", "")))
     current_text = clean_text(str(current.get("text", "")))
-    if not text_is_merge_artifact_candidate(previous_text) or not text_is_merge_artifact_candidate(current_text):
+    if not text_is_merge_artifact_candidate(
+        previous_text
+    ) or not text_is_merge_artifact_candidate(current_text):
         return False
     gap = float(current["bbox"][1]) - float(previous["bbox"][3])
     if gap < -6 or gap > 14:
@@ -1141,7 +1379,8 @@ def is_ambiguous_fragment_pair(previous: dict, current: dict) -> bool:
     previous_rect = fitz.Rect(previous["bbox"])
     current_rect = fitz.Rect(current["bbox"])
     if abs(current_rect.x0 - previous_rect.x0) > 36 and not (
-        current_rect.x0 >= previous_rect.x0 + 12 and current_rect.x1 <= previous_rect.x1 + 10
+        current_rect.x0 >= previous_rect.x0 + 12
+        and current_rect.x1 <= previous_rect.x1 + 10
     ):
         return False
     previous_role = str(previous.get("role", ""))
@@ -1152,12 +1391,29 @@ def is_ambiguous_fragment_pair(previous: dict, current: dict) -> bool:
         return False
     if current_text[:1].islower():
         return True
+    if syntok_prefers_merge(previous_text, current_text):
+        return True
     if current_role == "heading" and len(current_text) <= 96:
         return True
     if len(current_text) <= 96 and (
         current_text.isupper()
         or "\n" in str(current.get("text", ""))
-        or previous_text.split()[-1].lower() in {"de", "du", "des", "le", "la", "les", "d", "et", "of", "the", "and", "to", "for"}
+        or previous_text.split()[-1].lower()
+        in {
+            "de",
+            "du",
+            "des",
+            "le",
+            "la",
+            "les",
+            "d",
+            "et",
+            "of",
+            "the",
+            "and",
+            "to",
+            "for",
+        }
     ):
         return True
     return False
@@ -1243,11 +1499,15 @@ def run_codex_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, boo
         model = codex_fragment_merge_model()
         if model:
             cmd.extend(["--model", model])
-        subprocess.run(cmd, input=build_fragment_merge_prompt(candidates), text=True, check=True)
+        subprocess.run(
+            cmd, input=build_fragment_merge_prompt(candidates), text=True, check=True
+        )
         return parse_fragment_merge_response(output_file.read_text())
 
 
-def llm_fragment_merge_decisions(page_blocks: list[dict], cwd: Path) -> set[tuple[str, str]]:
+def llm_fragment_merge_decisions(
+    page_blocks: list[dict], cwd: Path
+) -> set[tuple[str, str]]:
     if not llm_fragment_merge_enabled():
         return set()
     ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
@@ -1273,7 +1533,9 @@ def llm_fragment_merge_decisions(page_blocks: list[dict], cwd: Path) -> set[tupl
                 "page_number": int(previous["page_number"]),
                 "previous_role": str(previous.get("role", "")),
                 "current_role": str(current.get("role", "")),
-                "vertical_gap": round(float(current["bbox"][1]) - float(previous["bbox"][3]), 2),
+                "vertical_gap": round(
+                    float(current["bbox"][1]) - float(previous["bbox"][3]), 2
+                ),
                 "previous_text": clean_text(str(previous.get("text", ""))),
                 "current_text": clean_text(str(current.get("text", ""))),
                 "cache_key": cache_key,
@@ -1316,7 +1578,10 @@ def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
             continue
         previous_rect = fitz.Rect(previous["bbox"])
         current_rect = fitz.Rect(block["bbox"])
-        same_lane = abs(current_rect.y0 - previous_rect.y0) <= 4.0 or abs(current_rect.x0 - previous_rect.x0) <= 10.0
+        same_lane = (
+            abs(current_rect.y0 - previous_rect.y0) <= 4.0
+            or abs(current_rect.x0 - previous_rect.x0) <= 10.0
+        )
         if same_lane:
             if normalized_words(previous_text) == normalized_words(current_text):
                 continue
@@ -1329,7 +1594,12 @@ def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
 
 
 def mark_margin_artifacts(page_blocks: list[dict]) -> None:
-    body_left_candidates = [block["bbox"][0] for block in page_blocks if (block["bbox"][2] - block["bbox"][0]) >= 60 and block.get("role") != "artifact"]
+    body_left_candidates = [
+        block["bbox"][0]
+        for block in page_blocks
+        if (block["bbox"][2] - block["bbox"][0]) >= 60
+        and block.get("role") != "artifact"
+    ]
     if not body_left_candidates:
         return
     body_left = median(body_left_candidates)
@@ -1351,7 +1621,12 @@ def normalize_cell_ocr_text(text: str) -> str:
         if not line:
             continue
         line = line.replace(";", ":")
-        line = re.sub(r"^(Name|Nom|Designation|Titre|Title)\s*[:.,]*\s*", lambda match: f"{match.group(1)}: ", line, flags=re.IGNORECASE)
+        line = re.sub(
+            r"^(Name|Nom|Designation|Titre|Title)\s*[:.,]*\s*",
+            lambda match: f"{match.group(1)}: ",
+            line,
+            flags=re.IGNORECASE,
+        )
         line = line.replace("SAMAMONEYMALI", "SAMA MONEY MALI")
         line = line.replace("ECOBANKMALI", "ECOBANK MALI")
         line = line.replace("GTOBAL", "GLOBAL")
@@ -1360,10 +1635,21 @@ def normalize_cell_ocr_text(text: str) -> str:
         line = line.replace("Mangeineg", "Managing")
         line = line.replace("Mangging", "Managing")
         line = line.replace("Directeu r", "Directeur")
-        line = re.sub(r"^(Titre|Designation):\s*(?:eo|CRE)\b", lambda match: f"{match.group(1)}: CEO", line, flags=re.IGNORECASE)
+        line = re.sub(
+            r"^(Titre|Designation):\s*(?:eo|CRE)\b",
+            lambda match: f"{match.group(1)}: CEO",
+            line,
+            flags=re.IGNORECASE,
+        )
         line = re.sub(r"\s{2,}", " ", line)
-        label_match = re.match(r"^(Name|Nom|Designation|Titre|Title):\s*(.+)$", line, flags=re.IGNORECASE)
-        if label_match and label_match.group(1).lower() in {"designation", "titre", "title"}:
+        label_match = re.match(
+            r"^(Name|Nom|Designation|Titre|Title):\s*(.+)$", line, flags=re.IGNORECASE
+        )
+        if label_match and label_match.group(1).lower() in {
+            "designation",
+            "titre",
+            "title",
+        }:
             if not is_reasonable_title_value(label_match.group(2)):
                 continue
         lines.append(line)
@@ -1378,8 +1664,20 @@ def is_reasonable_title_value(value: str) -> bool:
     if compact.upper() in acronyms:
         return True
     tokens = re.findall(r"[A-Za-zÀ-ÿ]+", compact)
-    known = {"president", "président", "director", "directeur", "general", "général", "managing"}
-    good_tokens = [token for token in tokens if len(token) >= 4 or token.lower() in known or token.upper() in acronyms]
+    known = {
+        "president",
+        "président",
+        "director",
+        "directeur",
+        "general",
+        "général",
+        "managing",
+    }
+    good_tokens = [
+        token
+        for token in tokens
+        if len(token) >= 4 or token.lower() in known or token.upper() in acronyms
+    ]
     return len(good_tokens) >= 2
 
 
@@ -1390,7 +1688,9 @@ def score_cell_ocr_text(text: str) -> tuple[int, int, int]:
     for line in lines:
         weird = len(re.findall(r"[^A-Za-zÀ-ÿ0-9 &:,'()./-]", line))
         line_score = len(line) - weird * 12
-        if re.match(r"^(Name|Nom|Designation|Titre|Title)\s*:", line, flags=re.IGNORECASE):
+        if re.match(
+            r"^(Name|Nom|Designation|Titre|Title)\s*:", line, flags=re.IGNORECASE
+        ):
             label_count += 1
             line_score += 40
         elif line.isupper() and len(line) > 6:
@@ -1399,7 +1699,15 @@ def score_cell_ocr_text(text: str) -> tuple[int, int, int]:
     return (label_count, len(lines), score)
 
 
-def best_text_from_top_crop(image: Image.Image, cell_rect: fitz.Rect, page_rect: fitz.Rect, current_text: str) -> str:
+def best_text_from_top_crop(
+    image: Image.Image,
+    cell_rect: fitz.Rect,
+    page_rect: fitz.Rect,
+    current_text: str,
+    *,
+    ocr_engine: str,
+    paddle_python: str | None,
+) -> str:
     width, height = image.size
     candidates = [normalize_cell_ocr_text(current_text)]
     fractions = (0.28, 0.34)
@@ -1407,10 +1715,22 @@ def best_text_from_top_crop(image: Image.Image, cell_rect: fitz.Rect, page_rect:
         x0 = max(0, page_pt_to_px(cell_rect.x0, page_rect.width, width) + 8)
         x1 = min(width, page_pt_to_px(cell_rect.x1, page_rect.width, width) - 8)
         y0 = max(0, page_pt_to_px(cell_rect.y0, page_rect.height, height) + 8)
-        y1 = min(height, page_pt_to_px(cell_rect.y0 + cell_rect.height * fraction, page_rect.height, height))
+        y1 = min(
+            height,
+            page_pt_to_px(
+                cell_rect.y0 + cell_rect.height * fraction, page_rect.height, height
+            ),
+        )
         if x1 - x0 < 16 or y1 - y0 < 16:
             continue
-        candidate = normalize_cell_ocr_text(pytesseract.image_to_string(image.crop((x0, y0, x1, y1)), config="--psm 6"))
+        candidate = normalize_cell_ocr_text(
+            ocr_image_to_string(
+                image.crop((x0, y0, x1, y1)),
+                engine=ocr_engine,
+                paddle_python=paddle_python,
+                psm="6",
+            )
+        )
         if candidate:
             candidates.append(candidate)
     return max(candidates, key=score_cell_ocr_text)
@@ -1422,7 +1742,10 @@ def assign_blocks_to_tables(page_blocks: list[dict], tables: list[dict]) -> None
             cell_rect = fitz.Rect(cell["bbox"])
             for block in page_blocks:
                 block_rect = fitz.Rect(block["bbox"])
-                center = fitz.Point((block_rect.x0 + block_rect.x1) / 2, (block_rect.y0 + block_rect.y1) / 2)
+                center = fitz.Point(
+                    (block_rect.x0 + block_rect.x1) / 2,
+                    (block_rect.y0 + block_rect.y1) / 2,
+                )
                 if not cell_rect.contains(center):
                     continue
                 cell["block_ids"].append(block["id"])
@@ -1435,7 +1758,9 @@ def assign_blocks_to_tables(page_blocks: list[dict], tables: list[dict]) -> None
                 block["role"] = "table_cell"
 
 
-def trim_to_content(image: Image.Image, threshold: int = 245, pad: int = 8) -> tuple[Image.Image | None, tuple[int, int] | None]:
+def trim_to_content(
+    image: Image.Image, threshold: int = 245, pad: int = 8
+) -> tuple[Image.Image | None, tuple[int, int] | None]:
     grayscale = np.array(image.convert("L"))
     if grayscale.size == 0 or grayscale.shape[0] < 8 or grayscale.shape[1] < 8:
         return None, None
@@ -1471,7 +1796,11 @@ def extract_signature_crops(
             body_height = cell_rect.height
             if body_height < 40:
                 continue
-            blocks = [block_by_id[block_id] for block_id in cell["block_ids"] if block_id in block_by_id]
+            blocks = [
+                block_by_id[block_id]
+                for block_id in cell["block_ids"]
+                if block_id in block_by_id
+            ]
             if not blocks:
                 continue
             text_bottom = max(block["bbox"][3] for block in blocks)
@@ -1489,7 +1818,10 @@ def extract_signature_crops(
             trimmed, offset = trim_to_content(cropped)
             if trimmed is None or offset is None:
                 continue
-            asset_path = assets_dir / f"page-{page_number:03d}-table-{table['id']}-cell-{cell['row_index']}-{cell['col_index']}-signature.png"
+            asset_path = (
+                assets_dir
+                / f"page-{page_number:03d}-table-{table['id']}-cell-{cell['row_index']}-{cell['col_index']}-signature.png"
+            )
             trimmed.save(asset_path)
             trimmed_width, trimmed_height = trimmed.size
             asset_x0 = x0 + offset[0]
@@ -1503,8 +1835,18 @@ def extract_signature_crops(
                     "bbox": [
                         round(page_px_to_pt(asset_x0, width, page_rect.width), 2),
                         round(page_px_to_pt(asset_y0, height, page_rect.height), 2),
-                        round(page_px_to_pt(asset_x0 + trimmed_width, width, page_rect.width), 2),
-                        round(page_px_to_pt(asset_y0 + trimmed_height, height, page_rect.height), 2),
+                        round(
+                            page_px_to_pt(
+                                asset_x0 + trimmed_width, width, page_rect.width
+                            ),
+                            2,
+                        ),
+                        round(
+                            page_px_to_pt(
+                                asset_y0 + trimmed_height, height, page_rect.height
+                            ),
+                            2,
+                        ),
                     ],
                     "path": str(asset_path),
                     "image_size_px": [trimmed_width, trimmed_height],
@@ -1525,6 +1867,9 @@ def fill_empty_cells_with_ocr(
     page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
+    *,
+    ocr_engine: str,
+    paddle_python: str | None,
 ) -> None:
     image = Image.open(render_path).convert("RGB")
     width, height = image.size
@@ -1541,7 +1886,12 @@ def fill_empty_cells_with_ocr(
             if x1 - x0 < 16 or y1 - y0 < 16:
                 continue
             cropped = image.crop((x0, y0, x1, y1))
-            extracted = clean_text(pytesseract.image_to_string(cropped, config="--psm 6"))
+            extracted = ocr_image_to_string(
+                cropped,
+                engine=ocr_engine,
+                paddle_python=paddle_python,
+                psm="6",
+            )
             if not extracted or is_probable_artifact(extracted):
                 continue
             block = {
@@ -1582,6 +1932,9 @@ def enrich_tall_cells_with_ocr(
     page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
+    *,
+    ocr_engine: str,
+    paddle_python: str | None,
 ) -> None:
     image = Image.open(render_path).convert("RGB")
     blocks_by_id = {block["id"]: block for block in page_blocks}
@@ -1596,7 +1949,14 @@ def enrich_tall_cells_with_ocr(
             if block is None:
                 continue
             current_text = str(block.get("text", ""))
-            enriched = best_text_from_top_crop(image, cell_rect, page_rect, current_text)
+            enriched = best_text_from_top_crop(
+                image,
+                cell_rect,
+                page_rect,
+                current_text,
+                ocr_engine=ocr_engine,
+                paddle_python=paddle_python,
+            )
             if score_cell_ocr_text(enriched) > score_cell_ocr_text(current_text):
                 block["text"] = enriched
 
@@ -1607,13 +1967,20 @@ def repeated_role_key(text: str) -> str:
     return compact
 
 
-def mark_repeated_headers_and_footers(all_blocks: list[dict], pages_payload: list[dict]) -> None:
-    page_heights = {int(page["page_number"]): float(page["height"]) for page in pages_payload}
+def mark_repeated_headers_and_footers(
+    all_blocks: list[dict], pages_payload: list[dict]
+) -> None:
+    page_heights = {
+        int(page["page_number"]): float(page["height"]) for page in pages_payload
+    }
     header_groups: dict[str, list[dict]] = defaultdict(list)
     footer_groups: dict[str, list[dict]] = defaultdict(list)
 
     for block in all_blocks:
-        if block.get("keep_original") or block.get("role") in {"artifact", "table_cell"}:
+        if block.get("keep_original") or block.get("role") in {
+            "artifact",
+            "table_cell",
+        }:
             continue
         page_height = page_heights.get(int(block["page_number"]))
         if not page_height:
@@ -1647,6 +2014,7 @@ def main() -> int:
 
     doc = fitz.open(input_pdf)
     selected = parse_page_selection(args.pages, doc.page_count)
+    ocr_engine = normalize_ocr_engine(args.ocr_engine)
     all_blocks = []
     all_assets = []
     pages_payload = []
@@ -1658,7 +2026,19 @@ def main() -> int:
             continue
         page = doc[page_index]
         page_type, region_source = classify_page(page)
-        regions = extract_native_regions(page) if region_source == "native" else extract_ocr_regions(page, args.magnify_factor if region_source == "ocr" else 1.0)
+        effective_region_source = (
+            region_source if region_source == "native" else f"ocr_{ocr_engine}"
+        )
+        regions = (
+            extract_native_regions(page)
+            if region_source == "native"
+            else extract_ocr_regions(
+                page,
+                args.magnify_factor if region_source == "ocr" else 1.0,
+                engine=ocr_engine,
+                paddle_python=args.paddle_python,
+            )
+        )
         regions = [region for region in regions if clean_text(region.text)]
         merged = merge_regions(regions)
 
@@ -1687,7 +2067,11 @@ def main() -> int:
                 "role": role,
                 "align": block["align"],
                 "style": {
-                    "font_size_hint": round(sum(region.font_size_hint for region in block["regions"]) / len(block["regions"]), 2),
+                    "font_size_hint": round(
+                        sum(region.font_size_hint for region in block["regions"])
+                        / len(block["regions"]),
+                        2,
+                    ),
                     "font_name": None,
                     "flags": None,
                     "color": None,
@@ -1696,8 +2080,14 @@ def main() -> int:
                     "italic": False,
                 },
                 "keep_original": role == "artifact",
-                "_font_size_hints": [float(region.font_size_hint) for region in block["regions"]],
-                "_native_lines": [line_payload(region) for region in block["regions"] if region.source == "native"],
+                "_font_size_hints": [
+                    float(region.font_size_hint) for region in block["regions"]
+                ],
+                "_native_lines": [
+                    line_payload(region)
+                    for region in block["regions"]
+                    if region.source == "native"
+                ],
                 "table": None,
             }
             page_blocks.append(payload)
@@ -1710,11 +2100,28 @@ def main() -> int:
             table["page_number"] = page_number
             table["cells"] = build_table_cells(page_number, table)
         assign_blocks_to_tables(page_blocks, page_tables)
-        fill_empty_cells_with_ocr(render_path, page_number, page.rect, page_tables, page_blocks)
-        enrich_tall_cells_with_ocr(render_path, page.rect, page_tables, page_blocks)
+        fill_empty_cells_with_ocr(
+            render_path,
+            page_number,
+            page.rect,
+            page_tables,
+            page_blocks,
+            ocr_engine=ocr_engine,
+            paddle_python=args.paddle_python,
+        )
+        enrich_tall_cells_with_ocr(
+            render_path,
+            page.rect,
+            page_tables,
+            page_blocks,
+            ocr_engine=ocr_engine,
+            paddle_python=args.paddle_python,
+        )
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
-        page_blocks = merge_paragraph_fragments(page_blocks, llm_fragment_merge_decisions(page_blocks, cwd=input_pdf.parent))
+        page_blocks = merge_paragraph_fragments(
+            page_blocks, llm_fragment_merge_decisions(page_blocks, cwd=input_pdf.parent)
+        )
         page_blocks = dedupe_ocr_blocks(page_blocks)
         mark_textual_table_like_rows(page_blocks)
         textual_tables = build_textual_tables(page_number, page_blocks)
@@ -1733,11 +2140,15 @@ def main() -> int:
                 continue
             block["text"] = normalize_cell_ocr_text(str(block.get("text", "")))
         finalize_block_layout(page_blocks, page.rect)
-        signature_assets = extract_signature_crops(render_path, page_number, page.rect, page_tables, page_blocks, assets_dir)
+        signature_assets = extract_signature_crops(
+            render_path, page_number, page.rect, page_tables, page_blocks, assets_dir
+        )
 
         for table in page_tables:
             for cell in table["cells"]:
-                blocks_in_cell = [block for block in page_blocks if block["id"] in cell["block_ids"]]
+                blocks_in_cell = [
+                    block for block in page_blocks if block["id"] in cell["block_ids"]
+                ]
                 blocks_in_cell.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
                 cell["text"] = "\n".join(block["text"] for block in blocks_in_cell)
 
@@ -1753,8 +2164,10 @@ def main() -> int:
             {
                 "page_number": page_number,
                 "page_type": page_type,
-                "region_source": region_source,
-                "strategy_hint": "rebuild" if ((page_tables and page_type != "scanned") or signature_assets) else "overlay",
+                "region_source": effective_region_source,
+                "strategy_hint": "rebuild"
+                if ((page_tables and page_type != "scanned") or signature_assets)
+                else "overlay",
                 "width": round(page.rect.width, 2),
                 "height": round(page.rect.height, 2),
                 "render_path": str(render_path),
@@ -1781,13 +2194,16 @@ def main() -> int:
         "input_pdf": str(input_pdf),
         "page_count": len(pages_payload),
         "block_count": len(all_blocks),
+        "ocr_engine": ocr_engine,
         "font_baseline": font_baseline,
         "pages": pages_payload,
         "blocks": all_blocks,
         "assets": all_assets,
     }
     (output_dir / "source.md").write_text("\n".join(markdown_lines))
-    (output_dir / "blocks.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    (output_dir / "blocks.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False)
+    )
     print(output_dir / "source.md")
     print(output_dir / "blocks.json")
     print(assets_dir)

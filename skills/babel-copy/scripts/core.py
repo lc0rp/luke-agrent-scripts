@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -21,6 +23,7 @@ PDF_SANS_FONT_NAME = "helv"
 DOCX_SERIF_FONT_NAME = "Times New Roman"
 DOCX_SANS_FONT_NAME = "Arial"
 DEFAULT_FONT_BASELINE_CLASS = "serif"
+DEFAULT_OCR_ENGINE = "tesseract"
 DEFAULT_OCR_LANG = "eng"
 DEFAULT_OCR_PSM = "4"
 _GLYPH_SUPPORT_CACHE: dict[tuple[str, str, int], bool] = {}
@@ -469,15 +472,102 @@ def ocr_page_image(page: fitz.Page, magnify_factor: float) -> tuple[Image.Image,
     return image, dpi / 72.0
 
 
-def extract_ocr_regions(page: fitz.Page, magnify_factor: float) -> list[TextRegion]:
-    image, scale = ocr_page_image(page, magnify_factor=magnify_factor)
-    ocr_lang = os.environ.get("BABEL_COPY_OCR_LANG", DEFAULT_OCR_LANG).strip() or DEFAULT_OCR_LANG
-    ocr_psm = os.environ.get("BABEL_COPY_OCR_PSM", DEFAULT_OCR_PSM).strip() or DEFAULT_OCR_PSM
+def normalize_ocr_engine(value: str | None) -> str:
+    raw = str(value or os.environ.get("BABEL_COPY_OCR_ENGINE", DEFAULT_OCR_ENGINE)).strip().lower()
+    if raw in {"paddle", "paddleocr"}:
+        return "paddle"
+    if raw in {"tesseract", "tess", ""}:
+        return "tesseract"
+    raise ValueError(f"Unsupported OCR engine: {value}")
+
+
+def default_paddle_python() -> str | None:
+    env_value = os.environ.get("BABEL_COPY_PADDLE_PYTHON", "").strip()
+    if env_value:
+        return env_value
+    candidates = [
+        Path.cwd() / ".venv-babel-paddle" / "bin" / "python",
+        Path.cwd() / ".venv-babel-paddle" / "bin" / "python3",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def paddle_bridge_script() -> Path:
+    return Path(__file__).resolve().with_name("paddle_ocr_bridge.py")
+
+
+def resolve_paddle_python(paddle_python: str | None = None) -> str:
+    resolved = str(paddle_python or default_paddle_python() or "").strip()
+    if not resolved:
+        raise RuntimeError(
+            "Paddle OCR requested but no Paddle Python interpreter was configured. "
+            "Pass --paddle-python, set BABEL_COPY_PADDLE_PYTHON, or create .venv-babel-paddle in the working directory."
+        )
+    if not Path(resolved).exists():
+        raise RuntimeError(f"Paddle Python interpreter was not found: {resolved}")
+    return resolved
+
+
+def paddle_lang_code(value: str | None) -> str:
+    raw = str(value or os.environ.get("BABEL_COPY_OCR_LANG", DEFAULT_OCR_LANG)).strip().lower()
+    if "+" in raw:
+        raw = raw.split("+", 1)[0]
+    aliases = {
+        "eng": "en",
+        "en": "en",
+        "english": "en",
+        "fra": "fr",
+        "fre": "fr",
+        "fr": "fr",
+        "french": "fr",
+    }
+    return aliases.get(raw, "en")
+
+
+def tesseract_lang_code(value: str | None) -> str:
+    return str(value or os.environ.get("BABEL_COPY_OCR_LANG", DEFAULT_OCR_LANG)).strip() or DEFAULT_OCR_LANG
+
+
+def tesseract_psm(value: str | None) -> str:
+    return str(value or os.environ.get("BABEL_COPY_OCR_PSM", DEFAULT_OCR_PSM)).strip() or DEFAULT_OCR_PSM
+
+
+def run_paddle_bridge(
+    image: Image.Image,
+    *,
+    mode: str,
+    paddle_python: str | None = None,
+    lang: str | None = None,
+) -> dict:
+    bridge = paddle_bridge_script()
+    python_bin = resolve_paddle_python(paddle_python)
+    with tempfile.TemporaryDirectory(prefix="babel-copy-paddle-") as tmp_raw:
+        tmp_dir = Path(tmp_raw)
+        image_path = tmp_dir / "input.png"
+        image.save(image_path, format="PNG")
+        cmd = [
+            python_bin,
+            str(bridge),
+            "--image",
+            str(image_path),
+            "--mode",
+            mode,
+            "--lang",
+            paddle_lang_code(lang),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+
+def tesseract_image_to_lines(image: Image.Image, *, lang: str | None = None, psm: str | None = None) -> list[dict[str, object]]:
     data = pytesseract.image_to_data(
         image,
-        lang=ocr_lang,
+        lang=tesseract_lang_code(lang),
         output_type=pytesseract.Output.DICT,
-        config=f"--psm {ocr_psm}",
+        config=f"--psm {tesseract_psm(psm)}",
     )
     groups: dict[tuple[int, int, int], dict[str, object]] = {}
     for idx in range(len(data["text"])):
@@ -489,19 +579,14 @@ def extract_ocr_regions(page: fitz.Page, magnify_factor: float) -> list[TextRegi
         if not text or confidence < 25:
             continue
         key = (int(data["block_num"][idx]), int(data["par_num"][idx]), int(data["line_num"][idx]))
-        group = groups.setdefault(key, {"tokens": [], "boxes": []})
+        group = groups.setdefault(key, {"tokens": [], "boxes": [], "confidence": []})
         tokens = group["tokens"]
         boxes = group["boxes"]
+        confidences = group["confidence"]
         assert isinstance(tokens, list)
         assert isinstance(boxes, list)
-        tokens.append(
-            (
-                int(data["word_num"][idx]),
-                int(data["left"][idx]),
-                int(data["top"][idx]),
-                text,
-            )
-        )
+        assert isinstance(confidences, list)
+        tokens.append((int(data["word_num"][idx]), int(data["left"][idx]), int(data["top"][idx]), text))
         boxes.append(
             (
                 int(data["left"][idx]),
@@ -510,7 +595,8 @@ def extract_ocr_regions(page: fitz.Page, magnify_factor: float) -> list[TextRegi
                 int(data["top"][idx]) + int(data["height"][idx]),
             )
         )
-    regions: list[TextRegion] = []
+        confidences.append(confidence)
+    lines: list[dict[str, object]] = []
     for group in groups.values():
         tokens = sorted(group["tokens"], key=lambda item: (item[0], item[1], item[2]))  # type: ignore[index]
         if not tokens:
@@ -519,13 +605,74 @@ def extract_ocr_regions(page: fitz.Page, magnify_factor: float) -> list[TextRegi
         if not text:
             continue
         bbox_px = union_bbox(group["boxes"])  # type: ignore[arg-type]
+        confidence_values = group["confidence"]  # type: ignore[assignment]
+        mean_confidence = float(sum(confidence_values) / len(confidence_values)) if confidence_values else 0.0
+        lines.append({"text": text, "bbox_px": list(bbox_px), "confidence": mean_confidence})
+    return lines
+
+
+def ocr_image_to_lines(
+    image: Image.Image,
+    *,
+    engine: str | None = None,
+    paddle_python: str | None = None,
+    lang: str | None = None,
+    psm: str | None = None,
+) -> list[dict[str, object]]:
+    selected = normalize_ocr_engine(engine)
+    if selected == "paddle":
+        payload = run_paddle_bridge(image, mode="lines", paddle_python=paddle_python, lang=lang)
+        lines = payload.get("lines", [])
+        return [line for line in lines if clean_text(str(line.get("text", "")))]
+    return tesseract_image_to_lines(image, lang=lang, psm=psm)
+
+
+def ocr_image_to_string(
+    image: Image.Image,
+    *,
+    engine: str | None = None,
+    paddle_python: str | None = None,
+    lang: str | None = None,
+    psm: str | None = None,
+) -> str:
+    selected = normalize_ocr_engine(engine)
+    if selected == "paddle":
+        payload = run_paddle_bridge(image, mode="text", paddle_python=paddle_python, lang=lang)
+        return clean_text(str(payload.get("text", "")))
+    return clean_text(
+        pytesseract.image_to_string(
+            image,
+            lang=tesseract_lang_code(lang),
+            config=f"--psm {tesseract_psm(psm)}",
+        )
+    )
+
+
+def extract_ocr_regions(
+    page: fitz.Page,
+    magnify_factor: float,
+    *,
+    engine: str | None = None,
+    paddle_python: str | None = None,
+) -> list[TextRegion]:
+    image, scale = ocr_page_image(page, magnify_factor=magnify_factor)
+    selected = normalize_ocr_engine(engine)
+    lines = ocr_image_to_lines(image, engine=selected, paddle_python=paddle_python)
+    regions: list[TextRegion] = []
+    for line in lines:
+        text = clean_text(str(line.get("text", "")))
+        if not text:
+            continue
+        bbox_px = tuple(float(value) for value in line.get("bbox_px", [])[:4])
+        if len(bbox_px) != 4:
+            continue
         bbox = tuple(value / scale for value in bbox_px)
         rect = fitz.Rect(bbox)
         regions.append(
             TextRegion(
                 bbox=bbox,
                 text=text,
-                source="ocr",
+                source=f"ocr_{selected}",
                 font_size_hint=max(MIN_FONT_SIZE, rect.height * 0.7),
                 align=infer_alignment(rect, page.rect),
             )
