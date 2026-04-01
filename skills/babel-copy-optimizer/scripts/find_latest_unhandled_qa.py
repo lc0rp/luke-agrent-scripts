@@ -21,11 +21,14 @@ class Candidate:
     comparison_report: Path
     compare_dir: Path
     status: str
+    review_status: str | None
     generated_at: str | None
     run_manifest_path: str | None
     run_output_dir: str | None
     document_id: str | None
     cycle_id: str | None
+    run_id: str | None
+    release_recommendation: str | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,11 +109,14 @@ def build_candidate(qa_path: Path) -> Candidate | None:
         comparison_report=comparison_report.resolve(),
         compare_dir=compare_dir.resolve(),
         status=status,
+        review_status=overall.get("review_status"),
         generated_at=generated_at,
         run_manifest_path=payload.get("run_manifest_path"),
         run_output_dir=payload.get("run_output_dir"),
         document_id=payload.get("document_id"),
         cycle_id=payload.get("cycle_id"),
+        run_id=payload.get("run_id"),
+        release_recommendation=overall.get("release_recommendation"),
     )
 
 
@@ -129,11 +135,14 @@ def main() -> int:
                     "comparison_report": str(latest.comparison_report),
                     "compare_dir": str(latest.compare_dir),
                     "status": latest.status,
+                    "review_status": latest.review_status,
                     "generated_at": latest.generated_at,
                     "run_manifest_path": latest.run_manifest_path,
                     "run_output_dir": latest.run_output_dir,
                     "document_id": latest.document_id,
                     "cycle_id": latest.cycle_id,
+                    "run_id": latest.run_id,
+                    "release_recommendation": latest.release_recommendation,
                 },
                 indent=2,
             )

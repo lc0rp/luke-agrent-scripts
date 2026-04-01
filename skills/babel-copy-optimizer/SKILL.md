@@ -45,6 +45,7 @@ For scheduled batch loops, use `scripts/run_optimization_cycle.py` in this skill
 Rules:
 
 - candidate reports are `qa-report.json` files whose `overall.status` is `fail`
+- `overall.review_status` may be `needs_review`; this still counts as failed and must not be treated as a pass
 - a QA report is `handled` if the same `compare/` directory already contains `optimizer-report.md` or `optimizer-report.json`
 - `latest` means highest `generated_at`; if missing, fall back to file mtime
 
@@ -83,6 +84,7 @@ Read:
 - the QA report
 - the sibling `comparison-report.json`
 - the `run_manifest_path` recorded in the QA report when present; otherwise the parent run's `run-manifest.json`
+- `overall.review_status`, `overall.review_gate_reasons`, `pages[*].review_status`, `pages[*].hotspot_reviews`, and `pages[*].challenger`
 - the relevant rendered page images for failed pages
 - the current `babel-copy` scripts or references implicated by the failures
 

@@ -12,6 +12,7 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 REQUIRED_CONSECUTIVE_PASSES = 2
+DEFAULT_STALE_LOCK_HOURS = 1.5
 LOCK_FILENAME = "loop.lock"
 CURRENT_CYCLE_FILENAME = "current-cycle.json"
 STATE_FILENAME = "state.json"
@@ -28,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start = subparsers.add_parser("start", help="Acquire the loop lock and create a new cycle.")
-    start.add_argument("--stale-after-hours", type=float, default=12.0)
+    start.add_argument("--stale-after-hours", type=float, default=DEFAULT_STALE_LOCK_HOURS)
 
     finish = subparsers.add_parser("finish", help="Finalize a cycle from the QA artifacts written during that cycle.")
     finish.add_argument("--cycle-id", help="Cycle id to finish. Defaults to the current locked cycle.")
@@ -310,13 +311,18 @@ def latest_qa_for_cycle(cycle_dir: Path) -> dict[str, dict[str, Any]]:
         entry = {
             "document_id": doc_id,
             "status": payload.get("overall", {}).get("status"),
+            "review_status": payload.get("overall", {}).get("review_status"),
             "overall_score": payload.get("overall", {}).get("overall_score"),
+            "needs_review_count": payload.get("overall", {}).get("needs_review_count"),
+            "review_gate_reasons": payload.get("overall", {}).get("review_gate_reasons"),
+            "release_recommendation": payload.get("overall", {}).get("release_recommendation"),
             "qa_report": str(qa_path.resolve()),
             "comparison_report": payload.get("comparison_report_path"),
             "run_manifest_path": payload.get("run_manifest_path"),
             "run_output_dir": payload.get("run_output_dir"),
             "cycle_id": payload.get("cycle_id"),
             "run_label": payload.get("run_label"),
+            "run_id": payload.get("run_id"),
             "generated_at": payload.get("generated_at"),
             "summary": payload.get("overall", {}).get("summary"),
         }
@@ -354,11 +360,14 @@ def finish_cycle(paths: LoopPaths, cycle_id: str | None) -> dict[str, Any]:
             document_results[doc_id] = {
                 "document_id": doc_id,
                 "status": "missing",
+                "review_status": None,
                 "qa_report": None,
                 "comparison_report": None,
                 "run_manifest_path": None,
                 "run_output_dir": None,
+                "run_id": None,
                 "generated_at": None,
+                "release_recommendation": None,
                 "summary": "No qa-report.json found for this document in the cycle directory.",
             }
             continue

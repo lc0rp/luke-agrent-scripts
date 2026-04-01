@@ -1,24 +1,26 @@
 ---
 name: babel-copy-qa
-description: Review one or more babel-copy or translate-in-place `comparison-report.json` files and produce deterministic `qa-report.json` outputs with page-level pass/fail verdicts, checklist-derived scores, and exact remediation notes. Use this whenever the user asks to QA translated PDF comparison renders, rate pages, score a translation output, decide sign-off readiness, or turn side-by-side comparison images into a structured report.
+description: Review one or more babel-copy or translate-in-place `comparison-report.json` files and produce deterministic `qa-report.json` outputs with page-level pass/fail verdicts, checklist-derived scores, hotspot coverage, challenger review outcomes, and exact remediation notes. Use this whenever the user asks to QA translated PDF comparison renders, rate pages, score a translation output, decide sign-off readiness, or turn side-by-side comparison images into a structured report for downstream optimization.
 ---
 
 # Babel Copy QA
 
-Use this skill to turn side-by-side comparison renders into a consistent QA decision.
+Use this skill to turn side-by-side comparison renders into a consistent QA decision that can drive the optimizer loop.
 
-This skill is optimized for `gpt-5.4-mini`. Keep the workflow narrow, explicit, and schema-driven. Prefer deterministic scoring over open-ended prose.
+This skill is optimized for `gpt-5.4-mini`. Keep the workflow narrow, explicit, visual-first, and schema-driven.
 
-## Input
+## Inputs
 
 One or more `comparison-report.json` files produced by `babel-copy` or compatible pipelines.
 
-Each report should contain:
+Expected report contents:
 
 - source and translated PDF paths
 - page counts
 - per-page `side_by_side_image`
 - per-page `mean_diff`
+
+If a sibling `run-manifest.json` exists one directory above `compare/`, preserve its baton fields in `qa-report.json`.
 
 ## Output
 
@@ -28,31 +30,101 @@ Default output path:
 
 - `<compare-dir>/qa-report.json`
 
-When the comparison report belongs to a standard `babel-copy` run directory, also carry forward the sibling `run-manifest.json` metadata into the QA report. This is the canonical hand-off to `babel-copy-optimizer` and to batch automation loops.
-
 Use the exact schema in `references/qa-report-schema.md`.
 
-## Fast Path
+## Required Workflow
 
-1. Run `python scripts/run_babel_copy_qa.py prepare <comparison-report-or-dir>...`
-2. Review every page image listed in the scaffolded `qa-report.json`
-3. Fill page checks, issues, summaries, and remediation notes
-4. Run `python scripts/run_babel_copy_qa.py finalize <comparison-report-or-dir>...`
+Use this sequence exactly:
 
-The script enforces the checklist shape and computes page and document scores.
+1. `python scripts/run_babel_copy_qa.py prepare <comparison-report-or-dir>...`
+2. Review every page image listed in each scaffolded `qa-report.json`
+3. Fill the page fields in two passes:
+   - defect hunt
+   - checklist scoring
+4. For every page that would otherwise pass, run a challenger pass
+5. `python scripts/run_babel_copy_qa.py finalize <comparison-report-or-dir>...`
 
-## Checklist Discipline
+The script validates the contract, computes scores, and rejects generic evidence.
+
+## Two-Pass Review
 
 Read `references/checklist.md` before grading pages.
+
+### Pass 1: Defect Hunt
+
+Find visible defects first. Do not score yet.
+
+Inspect these hotspots on every page:
+
+- top band
+- middle band
+- bottom band
+- densest text region
+- structured region when the page has bullets, icons, tables, forms, signatures, or other artifact-heavy content
+
+Record hotspot notes in `hotspot_reviews` with page-region-specific observations.
+
+If you see a real defect, add it to `issues` immediately and write `defect_hunt_summary`.
+
+### Pass 2: Checklist Scoring
+
+Only after the defect hunt:
+
+- fill every checklist item
+- use `pass`, `fail`, or `not_applicable` only
+- every `pass` and `fail` must include specific evidence
+- every `fail` must include concrete remediation
+
+Do not let a high-level “page looks fine” impression override a visible local defect.
+
+## Challenger Pass
+
+Every page that would otherwise pass must get a challenger pass.
+
+Goal:
+
+- ask a second mini pass to find any reason the page should fail or need manual review
+
+Represent this in the `challenger` object.
+
+Rules:
+
+- `challenger.status = clear` means the challenger found no blocker
+- `challenger.status = flagged` means the challenger found a blocker or ambiguity
+- `challenger.status = not_run` is not allowed on pages that would otherwise pass
+
+If the challenger flags a page:
+
+- set the relevant failed checks if the defect is clear
+- otherwise let finalization mark the page `review_status = needs_review`
+- overall `status` must remain `fail` so downstream optimization does not treat it as complete
+
+## Checklist Discipline
 
 Rules:
 
 - Judge the rendered page, not the source text in isolation.
-- Use `pass`, `fail`, or `not_applicable` only.
-- Mark `not_applicable` sparingly. If a page has a list, table, form, stamp, icon, logo, or footer, the related check is usually applicable.
-- Every failed check must include concrete evidence and a concrete remediation.
-- Every failed page must include at least one issue entry plus a short remediation summary.
-- Keep summaries short and factual.
+- Mark `not_applicable` sparingly.
+- If a page has bullets, icons, tables, forms, signatures, or branded footer/header elements, the related checks are usually applicable.
+- Every failed page must include at least one issue entry and a remediation summary.
+- Keep summaries factual and short.
+
+## Specific Evidence Rule
+
+Generic evidence is invalid.
+
+Bad evidence:
+
+- `No overlap, clipping, duplicate draws, or spillover are visible.`
+- `Translated text remains readable at normal zoom on the rendered page.`
+- `Layout matches the source page.`
+
+Good evidence:
+
+- `Bottom software-used block: second bullet text overlaps the green check icon and spills into the left gutter.`
+- `Middle paragraph under "NEW:" stays within the text column and does not cross the signature scribbles at the footer edge.`
+
+The finalizer rejects generic or duplicated evidence strings.
 
 ## Scoring
 
@@ -64,6 +136,7 @@ The script computes:
 - page pass/fail from score plus blocking-check failures
 - overall score from the average page score
 - overall pass/fail from page outcomes plus document-level checks
+- review status from challenger results
 
 Thresholds and weights live in `scripts/run_babel_copy_qa.py` and are documented in `references/checklist.md`.
 
@@ -73,13 +146,13 @@ Default to `gpt-5.4-mini`.
 
 Escalate to `gpt-5.4` only when one of these is true:
 
-- the page has subtle bilingual legal wording issues that are hard to judge visually
-- the render defect is ambiguous and could be either acceptable compression noise or a real layout failure
-- the document is being prepared for final external sign-off and the user explicitly wants a higher-confidence second pass
+- subtle bilingual legal wording is genuinely ambiguous
+- a render defect could plausibly be either harmless raster noise or a real blocker
+- the user explicitly wants a higher-confidence final sign-off pass
 
 ## Sub-Agent Pattern
 
-Use sub-agents only when the batch is large enough to justify it.
+Use sub-agents only when the batch is large enough to justify coordination.
 
 Good split points:
 
@@ -90,38 +163,16 @@ Use `gpt-5.4-mini` sub-agents for page inspection when:
 
 - reports are independent
 - page ownership is disjoint
-- the main agent can remain the sole aggregator
+- the main agent remains the sole aggregator
 
 Keep the main agent responsible for:
 
 - preparing scaffolds
-- merging sub-agent findings into the canonical `qa-report.json`
+- merging page findings into the canonical `qa-report.json`
 - running `finalize`
-- resolving cross-page consistency
+- preserving baton metadata for the optimizer
 
-Do not have multiple agents edit the same `qa-report.json` concurrently. Give each sub-agent a disjoint page set and merge once.
-
-## Review Scope
-
-Default review scope:
-
-- if the document has 20 pages or fewer, inspect every page
-- if the document has more than 20 pages, inspect every page with visible defects plus the first page, last page, and every page with tables, forms, signatures, diagrams, or branded layouts
-
-If the user asks for full QA, inspect every page regardless of length.
-
-## Page Review Order
-
-Review in this order:
-
-1. obvious geometry and layout failures
-2. text readability and collisions
-3. tables, lists, form structure
-4. headers, footers, branding, logos
-5. non-text artifacts
-6. target-language quality and terminology consistency
-
-This order is deliberate. `gpt-5.4-mini` is reliable when the visual failure scan happens before wording nuance.
+Do not let multiple agents edit the same `qa-report.json` concurrently.
 
 ## Mean Diff
 
@@ -131,21 +182,13 @@ Treat `mean_diff` as a routing hint only.
 - lower values do not guarantee correctness
 - never pass or fail a page from `mean_diff` alone
 
-Use it to prioritize pages for inspection, not to replace inspection.
+Use it to prioritize inspection, not to replace inspection.
 
-## Writing Findings
+## Known Failure Modes
 
-Issue entries should be terse and actionable.
+Read `references/failure-examples.md` when tuning the review on overlap-heavy pages.
 
-Good:
-
-- evidence: `Bottom bullet text overlaps the green check icons and wraps into the left margin.`
-- remediation: `Rebuild the software-used bullet block with wider text boxes and preserve icon gutters before rerunning comparison.`
-
-Bad:
-
-- evidence: `Looks off.`
-- remediation: `Fix formatting.`
+This file contains concrete examples of pages that must fail even when a generic first glance looks “mostly fine.”
 
 ## Final Check
 
@@ -153,4 +196,5 @@ Before handoff:
 
 - run `finalize`
 - confirm the script reports no validation errors
-- spot-check that each failed page has evidence and remediation that match the rendered image
+- confirm every passing page has hotspot coverage and challenger clearance
+- confirm the report still carries run-manifest baton fields when they exist
