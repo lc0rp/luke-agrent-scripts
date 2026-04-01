@@ -17,6 +17,7 @@ LOCK_FILENAME = "loop.lock"
 CURRENT_CYCLE_FILENAME = "current-cycle.json"
 STATE_FILENAME = "state.json"
 STATUS_FILENAME = "loop-status.md"
+ACTIVE_RUN_FILENAME = "active-run.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     release = subparsers.add_parser("release", help="Release the lock without scoring a cycle.")
     release.add_argument("--cycle-id", help="Cycle id expected in the current lock file.")
     release.add_argument("--reason", default="manual_release")
+    release.add_argument("--force", action="store_true", help="Override the active-worker guard.")
 
     status = subparsers.add_parser("status", help="Print the current loop state.")
     status.add_argument("--format", choices=("json", "path"), default="json")
@@ -271,12 +273,69 @@ def current_cycle_id(paths: LoopPaths) -> str:
     return str(cycle_id)
 
 
-def release_lock(paths: LoopPaths, cycle_id: str | None, reason: str, *, mark_aborted: bool = True) -> dict[str, Any]:
+def pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def active_run_markers(cycle_dir: Path) -> list[dict[str, Any]]:
+    active: list[dict[str, Any]] = []
+    if not cycle_dir.exists():
+        return active
+    for marker_path in sorted(cycle_dir.rglob(ACTIVE_RUN_FILENAME)):
+        payload = load_json(marker_path, default={})
+        pid_raw = payload.get("pid")
+        try:
+            pid = int(pid_raw)
+        except (TypeError, ValueError):
+            continue
+        hostname = str(payload.get("hostname") or "").strip()
+        same_host = not hostname or hostname == socket.gethostname()
+        if same_host and not pid_is_alive(pid):
+            continue
+        active.append(
+            {
+                "marker_path": str(marker_path),
+                "pid": pid,
+                "hostname": hostname,
+                "document_id": payload.get("document_id"),
+                "cycle_id": payload.get("cycle_id"),
+                "run_label": payload.get("run_label"),
+                "output_dir": payload.get("output_dir"),
+            }
+        )
+    return active
+
+
+def release_lock(
+    paths: LoopPaths,
+    cycle_id: str | None,
+    reason: str,
+    *,
+    mark_aborted: bool = True,
+    force: bool = False,
+) -> dict[str, Any]:
     payload = load_json(paths.lock_path, default={}) if paths.lock_path.exists() else {}
     locked_cycle_id = payload.get("cycle_id")
     resolved_cycle_id = cycle_id or (str(locked_cycle_id) if locked_cycle_id else None)
     if cycle_id and locked_cycle_id and str(locked_cycle_id) != cycle_id:
         raise SystemExit(f"Lock belongs to cycle {locked_cycle_id}, not {cycle_id}.")
+    if resolved_cycle_id and not force:
+        cycle_dir = paths.cycles_root / resolved_cycle_id
+        active_markers = active_run_markers(cycle_dir)
+        if active_markers:
+            summary = "; ".join(
+                f"doc={entry.get('document_id') or '?'} pid={entry['pid']} path={entry['marker_path']}"
+                for entry in active_markers
+            )
+            raise SystemExit(
+                f"Cannot release cycle {resolved_cycle_id}: active babel-copy workers are still running or unverified ({summary})."
+            )
     if mark_aborted and resolved_cycle_id:
         state = ensure_state(paths)
         update_cycle_entry(
@@ -446,7 +505,7 @@ def main() -> int:
     if args.command == "finish":
         return print_payload(finish_cycle(paths, args.cycle_id))
     if args.command == "release":
-        return print_payload(release_lock(paths, args.cycle_id, args.reason))
+        return print_payload(release_lock(paths, args.cycle_id, args.reason, force=args.force))
     if args.command == "status":
         state = ensure_state(paths)
         if args.format == "path":

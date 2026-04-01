@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import subprocess
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
+
+ACTIVE_RUN_FILENAME = "active-run.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +37,27 @@ def parse_args() -> argparse.Namespace:
 
 def run_step(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
+
+
+def utc_now_text() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def write_active_run_marker(output_dir: Path, args: argparse.Namespace, input_pdf: Path) -> Path:
+    marker_path = output_dir / ACTIVE_RUN_FILENAME
+    payload = {
+        "schema_version": "1.0",
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "started_at": utc_now_text(),
+        "input_pdf": str(input_pdf),
+        "output_dir": str(output_dir),
+        "document_id": args.document_id,
+        "cycle_id": args.cycle_id,
+        "run_label": args.run_label,
+    }
+    marker_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
+    return marker_path
 
 
 def recommend_pages(payload: dict) -> list[int]:
@@ -104,116 +130,120 @@ def main() -> int:
     input_pdf = Path(args.input_pdf).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    active_run_path = write_active_run_marker(output_dir, args, input_pdf)
     script_dir = Path(__file__).resolve().parent
 
-    extract_dir = output_dir / "extracted"
-    translated_dir = output_dir / "translated"
-    final_dir = output_dir / "final"
-    compare_dir = output_dir / "compare"
+    try:
+        extract_dir = output_dir / "extracted"
+        translated_dir = output_dir / "translated"
+        final_dir = output_dir / "final"
+        compare_dir = output_dir / "compare"
 
-    extract_cmd = [
-        sys.executable,
-        str(script_dir / "extract_document.py"),
-        str(input_pdf),
-        "--output-dir",
-        str(extract_dir),
-        "--magnify-factor",
-        str(args.magnify_factor),
-        "--dpi",
-        str(args.dpi),
-    ]
-    if args.pages:
-        extract_cmd.extend(["--pages", args.pages])
-    if args.font_baseline:
-        extract_cmd.extend(["--font-baseline", args.font_baseline])
-    if args.ocr_engine:
-        extract_cmd.extend(["--ocr-engine", args.ocr_engine])
-    if args.paddle_python:
-        extract_cmd.extend(["--paddle-python", args.paddle_python])
-    run_step(extract_cmd)
-
-    blocks_json = extract_dir / "blocks.json"
-    translated_json = translated_dir / "translated_blocks.json"
-    translate_cmd = [
-        sys.executable,
-        str(script_dir / "translate_blocks_codex.py"),
-        str(blocks_json),
-        "--output-json",
-        str(translated_json),
-        "--source-lang",
-        args.source_lang,
-        "--target-lang",
-        args.target_lang,
-        "--batch-size",
-        str(args.batch_size),
-    ]
-    if args.model:
-        translate_cmd.extend(["--model", args.model])
-    run_step(translate_cmd)
-
-    final_dir.mkdir(parents=True, exist_ok=True)
-    output_pdf = final_dir / f"{input_pdf.stem}.{args.target_lang.lower().replace(' ', '-')}.pdf"
-    build_cmd = [
-        sys.executable,
-        str(script_dir / "build_final_pdf.py"),
-        str(input_pdf),
-        str(translated_json),
-        "--output-pdf",
-        str(output_pdf),
-    ]
-    run_step(build_cmd)
-
-    if not args.skip_compare:
-        compare_cmd = [
+        extract_cmd = [
             sys.executable,
-            str(script_dir / "compare_rendered_pages.py"),
+            str(script_dir / "extract_document.py"),
             str(input_pdf),
-            str(output_pdf),
             "--output-dir",
-            str(compare_dir),
+            str(extract_dir),
+            "--magnify-factor",
+            str(args.magnify_factor),
+            "--dpi",
+            str(args.dpi),
         ]
-        run_step(compare_cmd)
+        if args.pages:
+            extract_cmd.extend(["--pages", args.pages])
+        if args.font_baseline:
+            extract_cmd.extend(["--font-baseline", args.font_baseline])
+        if args.ocr_engine:
+            extract_cmd.extend(["--ocr-engine", args.ocr_engine])
+        if args.paddle_python:
+            extract_cmd.extend(["--paddle-python", args.paddle_python])
+        run_step(extract_cmd)
 
-    extract_payload = json.loads(blocks_json.read_text())
-    check_notes = output_dir / "check-notes.md"
-    write_check_notes(extract_payload, output_pdf, compare_dir, check_notes, args.ocr_engine)
+        blocks_json = extract_dir / "blocks.json"
+        translated_json = translated_dir / "translated_blocks.json"
+        translate_cmd = [
+            sys.executable,
+            str(script_dir / "translate_blocks_codex.py"),
+            str(blocks_json),
+            "--output-json",
+            str(translated_json),
+            "--source-lang",
+            args.source_lang,
+            "--target-lang",
+            args.target_lang,
+            "--batch-size",
+            str(args.batch_size),
+        ]
+        if args.model:
+            translate_cmd.extend(["--model", args.model])
+        run_step(translate_cmd)
 
-    manifest = {
-        "schema_version": "1.0",
-        "skill": "babel-copy",
-        "run_id": output_dir.name,
-        "output_dir": str(output_dir),
-        "extract_dir": str(extract_dir),
-        "translated_dir": str(translated_dir),
-        "final_dir": str(final_dir),
-        "compare_dir": str(compare_dir),
-        "input_pdf": str(input_pdf),
-        "document_id": args.document_id,
-        "cycle_id": args.cycle_id,
-        "run_label": args.run_label,
-        "source_lang": args.source_lang,
-        "target_lang": args.target_lang,
-        "pages": args.pages,
-        "magnify_factor": args.magnify_factor,
-        "dpi": args.dpi,
-        "font_baseline": args.font_baseline,
-        "ocr_engine": args.ocr_engine,
-        "paddle_python": args.paddle_python,
-        "model": args.model,
-        "batch_size": args.batch_size,
-        "blocks_json": str(blocks_json),
-        "translated_blocks_json": str(translated_json),
-        "final_pdf": str(output_pdf),
-        "compare_report": str(compare_dir / "comparison-report.json") if not args.skip_compare else None,
-        "expected_qa_report": str(compare_dir / "qa-report.json") if not args.skip_compare else None,
-        "check_notes": str(check_notes),
-    }
-    manifest_path = output_dir / "run-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        final_dir.mkdir(parents=True, exist_ok=True)
+        output_pdf = final_dir / f"{input_pdf.stem}.{args.target_lang.lower().replace(' ', '-')}.pdf"
+        build_cmd = [
+            sys.executable,
+            str(script_dir / "build_final_pdf.py"),
+            str(input_pdf),
+            str(translated_json),
+            "--output-pdf",
+            str(output_pdf),
+        ]
+        run_step(build_cmd)
 
-    print(output_pdf)
-    print(manifest_path)
-    return 0
+        if not args.skip_compare:
+            compare_cmd = [
+                sys.executable,
+                str(script_dir / "compare_rendered_pages.py"),
+                str(input_pdf),
+                str(output_pdf),
+                "--output-dir",
+                str(compare_dir),
+            ]
+            run_step(compare_cmd)
+
+        extract_payload = json.loads(blocks_json.read_text())
+        check_notes = output_dir / "check-notes.md"
+        write_check_notes(extract_payload, output_pdf, compare_dir, check_notes, args.ocr_engine)
+
+        manifest = {
+            "schema_version": "1.0",
+            "skill": "babel-copy",
+            "run_id": output_dir.name,
+            "output_dir": str(output_dir),
+            "extract_dir": str(extract_dir),
+            "translated_dir": str(translated_dir),
+            "final_dir": str(final_dir),
+            "compare_dir": str(compare_dir),
+            "input_pdf": str(input_pdf),
+            "document_id": args.document_id,
+            "cycle_id": args.cycle_id,
+            "run_label": args.run_label,
+            "source_lang": args.source_lang,
+            "target_lang": args.target_lang,
+            "pages": args.pages,
+            "magnify_factor": args.magnify_factor,
+            "dpi": args.dpi,
+            "font_baseline": args.font_baseline,
+            "ocr_engine": args.ocr_engine,
+            "paddle_python": args.paddle_python,
+            "model": args.model,
+            "batch_size": args.batch_size,
+            "blocks_json": str(blocks_json),
+            "translated_blocks_json": str(translated_json),
+            "final_pdf": str(output_pdf),
+            "compare_report": str(compare_dir / "comparison-report.json") if not args.skip_compare else None,
+            "expected_qa_report": str(compare_dir / "qa-report.json") if not args.skip_compare else None,
+            "check_notes": str(check_notes),
+        }
+        manifest_path = output_dir / "run-manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        print(output_pdf)
+        print(manifest_path)
+        return 0
+    finally:
+        active_run_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
