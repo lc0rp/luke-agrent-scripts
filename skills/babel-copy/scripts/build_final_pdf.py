@@ -209,6 +209,21 @@ def preserved_overlay_ids(page_blocks: list[dict]) -> set[str]:
     return preserved
 
 
+def meaningful_rect_overlap(left_rect: fitz.Rect, right_rect: fitz.Rect) -> fitz.Rect | None:
+    intersection = left_rect & right_rect
+    if intersection.is_empty:
+        return None
+    if intersection.width <= 0.75 or intersection.height <= 0.75:
+        return None
+    return intersection
+
+
+def overlay_occupancy_rect(block: dict, page_blocks: list[dict], page_rect: fitz.Rect) -> fitz.Rect:
+    if block.get("role") == "artifact":
+        return fitz.Rect(block["bbox"])
+    return render_rect_for_block(block, page_blocks, page_rect)
+
+
 def filtered_payload_for_page(payload: dict, page_number: int, assets_by_id: dict[str, dict]) -> dict:
     page = next(page for page in payload.get("pages", []) if int(page["page_number"]) == page_number)
     blocks = [block for block in payload.get("blocks", []) if int(block["page_number"]) == page_number]
@@ -268,8 +283,10 @@ def render_overlay_page(
     out_page = out_doc[-1]
     source_page = source_doc[page_index]
     preserved_ids = preserved_overlay_ids(page_blocks)
+    occupied_rects: list[tuple[str, fitz.Rect, str]] = []
     for block in page_blocks:
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
+            occupied_rects.append((block["id"], overlay_occupancy_rect(block, page_blocks, out_page.rect), "preserved"))
             continue
         fill = core.estimate_background_color(source_page, tuple(block["bbox"]), "white")
         out_page.add_redact_annot(redaction_rect_for_block(block, page_blocks), fill=fill)
@@ -282,6 +299,17 @@ def render_overlay_page(
         if not str(text).strip():
             continue
         rect = render_rect_for_block(block, page_blocks, out_page.rect)
+        for obstacle_id, obstacle_rect, obstacle_kind in occupied_rects:
+            intersection = meaningful_rect_overlap(rect, obstacle_rect)
+            if intersection is None:
+                continue
+            raise SystemExit(
+                "Overlay collision detected on page "
+                f"{page.get('page_number')} between block {block['id']} and {obstacle_kind} "
+                f"block {obstacle_id}; intersection="
+                f"({intersection.x0:.2f}, {intersection.y0:.2f}, {intersection.x1:.2f}, {intersection.y1:.2f}). "
+                "Use a custom_override or switch this page to DOCX rebuild."
+            )
         style = block.get("style", {})
         render_font_name, render_font_file = resolve_font_resource(
             source_doc,
@@ -292,7 +320,7 @@ def render_overlay_page(
             str(font_baseline.get("pdf_font_name") or core.PDF_SERIF_FONT_NAME),
         )
         region = core.TextRegion(
-            bbox=tuple(block["bbox"]),
+            bbox=(round(rect.x0, 2), round(rect.y0, 2), round(rect.x1, 2), round(rect.y1, 2)),
             text=str(block.get("text", "")),
             source=str(block.get("source", "native")),
             font_size_hint=float(block.get("style", {}).get("font_size_hint", 10.5)),
@@ -306,7 +334,9 @@ def render_overlay_page(
         if remainder:
             # The core renderer already drew the block once at minimum size. Avoid a second draw pass,
             # which creates partially overlaid duplicate text on dense OCR pages.
+            occupied_rects.append((block["id"], rect, "translated"))
             continue
+        occupied_rects.append((block["id"], rect, "translated"))
     return out_doc
 
 
