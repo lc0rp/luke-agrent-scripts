@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -20,8 +19,8 @@ MIN_FONT_SIZE = 6.5
 FONT_NAME = "helv"
 PDF_SERIF_FONT_NAME = "Times-Roman"
 PDF_SANS_FONT_NAME = "helv"
-DOCX_SERIF_FONT_NAME = "Times New Roman"
-DOCX_SANS_FONT_NAME = "Arial"
+TEXT_SERIF_FONT_NAME = "Times New Roman"
+TEXT_SANS_FONT_NAME = "Arial"
 DEFAULT_FONT_BASELINE_CLASS = "serif"
 DEFAULT_OCR_ENGINE = "tesseract"
 DEFAULT_OCR_LANG = "eng"
@@ -121,8 +120,8 @@ def pdf_font_name_for_family_class(family_class: object) -> str:
     return PDF_SANS_FONT_NAME if normalize_font_family_class(family_class) == "sans" else PDF_SERIF_FONT_NAME
 
 
-def docx_font_name_for_family_class(family_class: object) -> str:
-    return DOCX_SANS_FONT_NAME if normalize_font_family_class(family_class) == "sans" else DOCX_SERIF_FONT_NAME
+def text_font_name_for_family_class(family_class: object) -> str:
+    return TEXT_SANS_FONT_NAME if normalize_font_family_class(family_class) == "sans" else TEXT_SERIF_FONT_NAME
 
 
 def build_font_baseline(family_class: object, *, source: str, reason: str | None = None) -> dict[str, str]:
@@ -130,7 +129,7 @@ def build_font_baseline(family_class: object, *, source: str, reason: str | None
     baseline = {
         "family_class": normalized,
         "pdf_font_name": pdf_font_name_for_family_class(normalized),
-        "docx_font_name": docx_font_name_for_family_class(normalized),
+        "text_font_name": text_font_name_for_family_class(normalized),
         "source": str(source),
     }
     if reason:

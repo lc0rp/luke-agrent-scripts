@@ -136,13 +136,13 @@ def font_resource_is_usable(
 
 def choose_page_mode(page: dict, assets_by_id: dict[str, dict]) -> str:
     if page.get("tables") and str(page.get("page_type", "")) != "scanned":
-        return "docx_rebuild"
+        return "structured_rebuild"
     for asset_id in page.get("asset_ids", []):
         asset = assets_by_id.get(asset_id)
         if not asset:
             continue
         if asset.get("kind") == "signature_crop":
-            return "docx_rebuild"
+            return "structured_rebuild"
     return "template_overlay"
 
 
@@ -308,7 +308,7 @@ def render_overlay_page(
                 f"{page.get('page_number')} between block {block['id']} and {obstacle_kind} "
                 f"block {obstacle_id}; intersection="
                 f"({intersection.x0:.2f}, {intersection.y0:.2f}, {intersection.x1:.2f}, {intersection.y1:.2f}). "
-                "Use a custom_override or switch this page to DOCX rebuild."
+                "Use a custom_override or switch this page to rebuild mode."
             )
         style = block.get("style", {})
         render_font_name, render_font_file = resolve_font_resource(
@@ -450,7 +450,7 @@ def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.
     return fitz.Rect(rect.x0, rect.y0, round(next_x0, 2), rect.y1)
 
 
-def render_page_via_docx(
+def render_page_via_typst(
     payload: dict,
     page_number: int,
     output_pdf: Path,
@@ -463,25 +463,25 @@ def render_page_via_docx(
 ) -> Path:
     script_dir = Path(__file__).resolve().parent
     page_payload = filtered_payload_for_page(payload, page_number, assets_by_id)
-    default_docx_font = str(font_baseline.get("docx_font_name") or core.DOCX_SERIF_FONT_NAME)
+    default_text_font = str(font_baseline.get("text_font_name") or core.TEXT_SERIF_FONT_NAME)
     for block in page_payload.get("blocks", []):
         style = block.setdefault("style", {})
         if not font_resource_is_usable(source_doc, font_catalog, style.get("font_name"), font_usability_cache, temp_dir):
-            style["font_name"] = default_docx_font
+            style["font_name"] = default_text_font
     with tempfile.TemporaryDirectory(prefix="babel-copy-build-page-") as tmp_dir_raw:
         tmp_dir = Path(tmp_dir_raw)
-        docx_path = tmp_dir / f"page-{page_number:03d}.docx"
+        typ_path = tmp_dir / f"page-{page_number:03d}.typ"
         page_json = tmp_dir / f"page-{page_number:03d}.json"
         page_json.write_text(json.dumps(page_payload, indent=2, ensure_ascii=False))
         subprocess.run(
-            [sys.executable, str(Path(script_dir / "rebuild_docx.py")), str(page_json), "--output-docx", str(docx_path)],
+            [sys.executable, str(Path(script_dir / "rebuild_typst.py")), str(page_json), "--output-typ", str(typ_path)],
             check=True,
         )
+        rendered_pdf = tmp_dir / f"{typ_path.stem}.pdf"
         subprocess.run(
-            [sys.executable, str(Path(script_dir / "export_pdf.py")), str(docx_path), "--output-dir", str(tmp_dir)],
+            [sys.executable, str(Path(script_dir / "export_typst_pdf.py")), str(typ_path), "--output-pdf", str(rendered_pdf)],
             check=True,
         )
-        rendered_pdf = tmp_dir / f"{docx_path.stem}.pdf"
         output_pdf.parent.mkdir(parents=True, exist_ok=True)
         output_pdf.write_bytes(rendered_pdf.read_bytes())
     return output_pdf
@@ -512,7 +512,7 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path) ->
                 with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
                     temp_path = Path(tmp_file.name)
                 temp_paths.append(temp_path)
-                render_page_via_docx(
+                render_page_via_typst(
                     payload,
                     page_number,
                     temp_path,

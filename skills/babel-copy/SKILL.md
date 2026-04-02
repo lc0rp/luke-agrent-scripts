@@ -22,7 +22,7 @@ Use this skill when the translated document should read like a proper target-lan
   - structured block manifest
   - document-level `font_baseline` captured in the manifest
   - translated text in Markdown or JSON blocks
-  - rebuilt rich-layout source, preferably `.html` & `.css`
+  - rebuilt rich-layout source, preferably `.typ`
   - QA renders and notes
   - `run-manifest.json` with canonical artifact paths for QA and optimizer hand-off
 
@@ -79,8 +79,8 @@ Choose a document-level fallback font baseline from those preview renders before
 
 Baseline mapping:
 
-- `serif` -> PDF overlay fallback `Times-Roman`; DOCX rebuild fallback `Times New Roman`
-- `sans` -> PDF overlay fallback `helv`; DOCX rebuild fallback `Arial`
+- `serif` -> PDF overlay fallback `Times-Roman`; structured rebuild fallback `Times New Roman`
+- `sans` -> PDF overlay fallback `helv`; structured rebuild fallback `Arial`
 
 Clean OCR noise during extraction:
 
@@ -168,9 +168,9 @@ If no API or local MT backend is available or desired, use a manual phrase-map f
 
 ### 3. Rebuild Layout
 
-Default target: `.docx`
+Default target: `.typ`
 
-Use Word-style paragraph layout for legal documents unless HTML, React, canvas, or another intermediate layout format is materially better for the specific page class. The rebuilt document should:
+Use paragraph-first structured layout for legal documents unless HTML, React, canvas, or another intermediate layout format is materially better for the specific page class. The rebuilt document should:
 
 - preserve page count when feasible
 - preserve section hierarchy
@@ -192,8 +192,8 @@ Do not force the entire document through one strategy if that strategy is obviou
 
 Current bundled rebuild path:
 
-- `scripts/rebuild_docx.py`
-- `scripts/export_pdf.py`
+- `scripts/rebuild_typst.py`
+- `scripts/export_typst_pdf.py`
 - `scripts/build_final_pdf.py`
 - `scripts/run_babel_copy.py`
 
@@ -207,14 +207,14 @@ These fields are written into `run-manifest.json` so `babel-copy-qa` and `babel-
 
 This now supports:
 
-- page-size-aware `.docx` rebuild
+- page-size-aware Typst rebuild
 - visual-first serif / sans fallback selection carried from extraction into rebuild
 - detected table and form reconstruction
 - signature and stamp image crops placed back into table cells
 - manual block-translation templates for rebuild-first workflows
 - adaptive final PDF assembly:
   - template-preserving overlay for branded native-text or scan-heavy pages
-  - per-page `.docx` rebuild fallback for form/table/signature pages inside the same document
+  - per-page structured rebuild fallback for form/table/signature pages inside the same document
   - translated repeated footers and headers as real translatable blocks
 - end-to-end runner:
   - extract -> `codex exec` translation -> hybrid final PDF build -> rendered comparison report -> check notes
@@ -299,8 +299,8 @@ This skill now ships its own bundled scripts:
 - `scripts/extract_document.py`: source text, block manifest, and asset extraction
 - `scripts/paddle_ocr_bridge.py`: PaddleOCR sidecar used when `--ocr-engine paddle` is selected
 - `scripts/babel_copy_manual.py`: manual extract/apply bootstrap flow
-- `scripts/rebuild_docx.py`: minimal `.docx` rebuild from translated blocks
-- `scripts/export_pdf.py`: LibreOffice-based PDF export
+- `scripts/rebuild_typst.py`: minimal `.typ` rebuild from translated blocks
+- `scripts/export_typst_pdf.py`: Typst CLI PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
 - `scripts/setup_paddle_env.sh`: creates a dedicated PaddleOCR virtualenv for A/B runs
@@ -309,7 +309,7 @@ This skill now ships its own bundled scripts:
 
 Current limitation:
 
-- the legacy manual apply path still uses direct PDF composition instead of the rebuild-first `.docx` path
+- the legacy manual apply path still uses direct PDF composition instead of the rebuild-first Typst path
 - OCR cleanup still needs tightening for noisy artifacts and damaged headings
 - lightweight tables without visible borders still rely on overlap-preservation heuristics more than true semantic reconstruction
 - signature images are reinserted with cell-aware placement, not true floating-page anchors

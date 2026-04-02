@@ -47,7 +47,7 @@ Required document-level properties:
 
 - `font_baseline.family_class`: `serif` or `sans`
 - `font_baseline.pdf_font_name`: `Times-Roman` or `helv`
-- `font_baseline.docx_font_name`: `Times New Roman` or `Arial`
+- `font_baseline.text_font_name`: `Times New Roman` or `Arial`
 - `font_baseline.source`: how the decision was made, preferably visual inspection
 
 ### Stage 2: Translation
@@ -78,7 +78,7 @@ Not on:
 
 Preferred output:
 
-- `.docx`
+- `.typ`
 
 Fallback:
 
@@ -95,11 +95,12 @@ Rebuild from structure, not from scan pixels. Match:
 
 Current shipped implementation:
 
-- `scripts/rebuild_docx.py`
 - `scripts/build_final_pdf.py`
 - `scripts/run_babel_copy.py`
+- `scripts/rebuild_typst.py`
+- `scripts/export_typst_pdf.py`
 
-This script now rebuilds page-sized `.docx` output with:
+This script now rebuilds page-sized Typst output with:
 
 - page breaks
 - basic alignment and typography
@@ -138,7 +139,7 @@ Automation-oriented runs should also emit a `run-manifest.json` with enough meta
 - `cycle_id` when supplied
 - `run_label` when supplied
 
-If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through `.docx` first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
+If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through structured rebuild first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
 
 QA priorities:
 
@@ -165,20 +166,20 @@ Visual inspection scope:
 
 1. better block extraction
 2. manual or glossary-aware translation over blocks
-3. docx rebuild for text and form pages
+3. Typst rebuild for text and form pages
 4. stronger OCR cleanup and floating asset placement
 5. source-overlay fallback for hard pages
 6. adaptive finalizer that picks overlay or rebuild per page
 
-## What "Full .docx Rebuild Path" Means
+## What "Full Structured Rebuild Path" Means
 
-It means the final PDF should come from an editable `.docx` that was rebuilt from extracted structure, not from direct PDF redaction overlays.
+It means the final PDF should come from an editable intermediate rebuilt from extracted structure, not from direct PDF redaction overlays.
 
 Concretely:
 
 - source PDF -> `source.md` + `blocks.json` + `assets/`
 - translation step -> `translated_blocks.json`
-- rebuild step -> `.docx` with page breaks, headings, paragraphs, tables, form labels, and preserved signature boxes
+- rebuild step -> `.typ` with page breaks, headings, paragraphs, tables, form labels, and preserved signature boxes
 - export step -> PDF
 
 The goal is:
@@ -187,4 +188,4 @@ The goal is:
 - correct pagination
 - clean white background
 - preserved signature and form regions
-- a result closer to a professionally rebuilt Word document than to a painted-over scan
+- a result closer to a professionally rebuilt document than to a painted-over scan
