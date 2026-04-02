@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 
-def load_module(module_name: str, path: str):
+def load_module(module_name: str, path: Path):
     if "openai" not in sys.modules:
         fake_openai = types.ModuleType("openai")
 
@@ -22,20 +22,21 @@ def load_module(module_name: str, path: str):
 
         fake_openai.OpenAI = DummyOpenAI
         sys.modules["openai"] = fake_openai
-    spec = importlib.util.spec_from_file_location(module_name, path)
+    spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TRANSLATE_BLOCKS_CODEX = load_module(
     "test_translate_blocks_codex",
-    "/Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy/scripts/translate_blocks_codex.py",
+    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_codex.py",
 )
 RUN_OPTIMIZATION_CYCLE = load_module(
     "test_run_optimization_cycle",
-    "/Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy-optimizer/scripts/run_optimization_cycle.py",
+    REPO_ROOT / "skills" / "babel-copy-optimizer" / "scripts" / "run_optimization_cycle.py",
 )
 
 
@@ -49,6 +50,17 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(
             [entry["source"] for entry in candidates],
             ["dotenv_openai_api_key", "env_openai_api_key"],
+        )
+
+    def test_resolve_anthropic_api_candidates_prefers_dotenv_then_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            cwd = Path(tmp_raw)
+            (cwd / ".env").write_text("ANTHROPIC_API_KEY=dotenv-key-12345678901234567890\n")
+            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "env-key-12345678901234567890"}, clear=False):
+                candidates = TRANSLATE_BLOCKS_CODEX.resolve_anthropic_api_candidates(cwd)
+        self.assertEqual(
+            [entry["source"] for entry in candidates],
+            ["dotenv_anthropic_api_key", "env_anthropic_api_key"],
         )
 
     def test_try_openai_fallback_skips_invalid_dotenv_and_uses_env(self) -> None:
@@ -72,61 +84,64 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         run_openai.assert_called_once()
         self.assertEqual(run_openai.call_args.kwargs["api_key"], "env-key-12345678901234567890")
 
-    def test_try_openai_fallback_prefers_valid_dotenv_over_invalid_env(self) -> None:
+    def test_try_anthropic_fallback_skips_invalid_dotenv_and_uses_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("OPENAI_API_KEY=dotenv-key-12345678901234567890\n")
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "xxxxxx"}, clear=False):
+            (cwd / ".env").write_text("ANTHROPIC_API_KEY=xxxxxx\n")
+            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "env-key-12345678901234567890"}, clear=False):
                 with mock.patch.object(
                     TRANSLATE_BLOCKS_CODEX,
-                    "run_openai",
+                    "run_anthropic",
                     return_value={"block-1": "translated"},
-                ) as run_openai:
-                    result = TRANSLATE_BLOCKS_CODEX.try_openai_fallback(
+                ) as run_anthropic:
+                    result = TRANSLATE_BLOCKS_CODEX.try_anthropic_fallback(
                         "prompt",
                         cwd=cwd,
-                        model="gpt-5.4-mini",
+                        model="claude-sonnet-4-20250514",
                         batch_index=1,
                         total_batches=1,
                     )
-        self.assertEqual(result, ({"block-1": "translated"}, "dotenv_openai_api_key"))
-        run_openai.assert_called_once()
-        self.assertEqual(run_openai.call_args.kwargs["api_key"], "dotenv-key-12345678901234567890")
+        self.assertEqual(result, ({"block-1": "translated"}, "env_anthropic_api_key"))
+        run_anthropic.assert_called_once()
+        self.assertEqual(run_anthropic.call_args.kwargs["api_key"], "env-key-12345678901234567890")
 
-    def test_try_openai_fallback_retries_next_candidate_after_invalid_api_key(self) -> None:
+    def test_detect_runtime_mode_prefers_explicit_claude_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("OPENAI_API_KEY=dotenv-key-12345678901234567890\n")
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "env-key-12345678901234567890"}, clear=False):
-                run_openai = mock.Mock(
-                    side_effect=[
-                        RuntimeError("401 invalid_api_key"),
-                        {"block-1": "translated"},
-                    ]
-                )
-                with mock.patch.object(TRANSLATE_BLOCKS_CODEX, "run_openai", run_openai):
-                    result = TRANSLATE_BLOCKS_CODEX.try_openai_fallback(
-                        "prompt",
-                        cwd=cwd,
-                        model="gpt-5.4-mini",
-                        batch_index=1,
-                        total_batches=1,
-                    )
-        self.assertEqual(result, ({"block-1": "translated"}, "env_openai_api_key"))
-        self.assertEqual(run_openai.call_count, 2)
+            with mock.patch.dict(os.environ, {"BABEL_COPY_RUNTIME_MODE": "claude"}, clear=False):
+                mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode(cwd, "auto")
+        self.assertEqual(mode, "claude")
 
-    def test_try_openai_fallback_returns_none_when_no_candidates_exist(self) -> None:
+    def test_detect_runtime_mode_prefers_anthropic_only_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             cwd = Path(tmp_raw)
-            with mock.patch.dict(os.environ, {}, clear=True):
-                result = TRANSLATE_BLOCKS_CODEX.try_openai_fallback(
-                    "prompt",
-                    cwd=cwd,
-                    model="gpt-5.4-mini",
-                    batch_index=1,
-                    total_batches=1,
-                )
-        self.assertIsNone(result)
+            (cwd / ".env").write_text("ANTHROPIC_API_KEY=dotenv-key-12345678901234567890\n")
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(TRANSLATE_BLOCKS_CODEX.shutil, "which", side_effect=lambda name: "/usr/bin/" + name),
+            ):
+                mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode(cwd, "auto")
+        self.assertEqual(mode, "claude")
+
+    def test_run_claude_uses_print_mode_by_default(self) -> None:
+        completed = subprocess_completed('{"translations":{"block-1":"translated"}}')
+        with (
+            mock.patch.object(TRANSLATE_BLOCKS_CODEX.shutil, "which", return_value="/opt/homebrew/bin/claude"),
+            mock.patch.object(TRANSLATE_BLOCKS_CODEX, "log_claude_auth_context", return_value={"auth_path": "claude_code_cli"}),
+            mock.patch.object(TRANSLATE_BLOCKS_CODEX.subprocess, "run", return_value=completed) as run_subprocess,
+        ):
+            translations, context = TRANSLATE_BLOCKS_CODEX.run_claude("prompt", Path("/tmp/work"), None)
+        self.assertEqual(translations, {"block-1": "translated"})
+        self.assertEqual(context["auth_path"], "claude_code_cli")
+        cmd = run_subprocess.call_args.args[0]
+        self.assertIn("-p", cmd)
+        self.assertIn("--output-format", cmd)
+        self.assertIn("--tools", cmd)
+        self.assertEqual(run_subprocess.call_args.kwargs["cwd"], "/tmp/work")
+
+
+def subprocess_completed(stdout: str):
+    return mock.Mock(stdout=stdout, stderr="", returncode=0)
 
 
 class ReleaseGuardTests(unittest.TestCase):

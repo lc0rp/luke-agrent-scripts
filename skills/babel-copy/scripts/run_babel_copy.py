@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ocr-engine", choices=("tesseract", "paddle"), default="tesseract")
     parser.add_argument("--paddle-python", help="Python interpreter from a separate Paddle OCR env.")
     parser.add_argument("--model")
+    parser.add_argument("--translation-provider", choices=("auto", "codex", "claude", "openai", "anthropic", "google"))
     parser.add_argument("--batch-size", type=int, default=18)
     parser.add_argument("--skip-compare", action="store_true")
     return parser.parse_args()
@@ -177,6 +178,8 @@ def main() -> int:
         ]
         if args.model:
             translate_cmd.extend(["--model", args.model])
+        if args.translation_provider:
+            translate_cmd.extend(["--provider", args.translation_provider])
         run_step(translate_cmd)
 
         final_dir.mkdir(parents=True, exist_ok=True)
@@ -228,6 +231,7 @@ def main() -> int:
             "ocr_engine": args.ocr_engine,
             "paddle_python": args.paddle_python,
             "model": args.model,
+            "translation_provider": args.translation_provider,
             "batch_size": args.batch_size,
             "blocks_json": str(blocks_json),
             "translated_blocks_json": str(translated_json),
