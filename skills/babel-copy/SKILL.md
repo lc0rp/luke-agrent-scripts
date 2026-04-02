@@ -22,7 +22,7 @@ Use this skill when the translated document should read like a proper target-lan
   - structured block manifest
   - document-level `font_baseline` captured in the manifest
   - translated text in Markdown or JSON blocks
-  - rebuilt rich-layout source, preferably `.html` & `.css`
+  - rebuilt rich-layout source, preferably `.typ`
   - QA renders and notes
   - `run-manifest.json` with canonical artifact paths for QA and optimizer hand-off
 
@@ -79,8 +79,8 @@ Choose a document-level fallback font baseline from those preview renders before
 
 Baseline mapping:
 
-- `serif` -> PDF overlay fallback `Times-Roman`; DOCX rebuild fallback `Times New Roman`
-- `sans` -> PDF overlay fallback `helv`; DOCX rebuild fallback `Arial`
+- `serif` -> PDF overlay fallback `Times-Roman`; structured rebuild fallback `Times New Roman`
+- `sans` -> PDF overlay fallback `helv`; structured rebuild fallback `Arial`
 
 Clean OCR noise during extraction:
 
@@ -135,29 +135,34 @@ Translate with context:
 
 Current translation fallback order for `scripts/translate_blocks_codex.py`:
 
-1. `codex exec` using the current local Codex CLI auth context
-2. `OPENAI_API_KEY` loaded from `.env` in the translation working directory
-3. inherited `OPENAI_API_KEY` from the process environment
+1. detect runtime mode and choose the matching CLI family:
+   - Codex mode: `codex exec`
+   - Claude mode: `claude` CLI with non-interactive print/exec flags
+2. matching API-key fallback from `.env` in the translation working directory:
+   - Codex mode: `OPENAI_API_KEY`
+   - Claude mode: `ANTHROPIC_API_KEY`
+3. matching inherited API key from the process environment
 4. Google Translate fallback
 
 Auth and fallback behavior:
 
-- before each `codex exec` call, log the local Codex auth context in a grep-friendly structured line
+- before each CLI call, log the active translation runtime in a grep-friendly structured line
+- Codex mode logs the local Codex auth context; Claude mode logs the detected Claude CLI context
 - for `chatgpt` auth, log `auth_mode=chatgpt` and the active account email
 - for API-key auth, log only the last 4 characters of the key
-- also log whether a cwd `.env` exists and whether an inherited `OPENAI_API_KEY` is present
+- also log whether a cwd `.env` exists and whether inherited `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` values are present
 - never log full API keys, tokens, or raw credential payloads
 - when fallback advances from one backend to the next, emit an explicit note in stderr/logs so automation can tell a temporary usage-limit retry from a terminal failure
-- if an API-key fallback returns `401 invalid_api_key`, log which source failed: cwd `.env` or inherited environment
+- if an API-key fallback returns an authentication failure, log which source failed: cwd `.env` or inherited environment
 
 Resume and loop-safety expectations:
 
 - `scripts/run_babel_copy.py` writes an `active-run.json` marker while a document job is still in flight
 - `scripts/run_optimization_cycle.py release` now refuses to release a cycle when active babel-copy workers are still running, unless explicitly forced
-- this prevents a temporary Codex usage-limit event from aborting the cycle while an OpenAI or Google fallback translation is still progressing
+- this prevents a temporary CLI or API usage-limit event from aborting the cycle while an OpenAI, Anthropic, or Google fallback translation is still progressing
 - if a run stops mid-cycle, the next automation pass should inspect existing attempt artifacts first and continue from the latest viable translated output instead of assuming the cycle is cleanly aborted
 
-When the document is complex, it is acceptable to delegate specific components or blocks to `codex exec` or sub-agents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
+When the document is complex, it is acceptable to delegate specific components or blocks to the active CLI translator or sub-agents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
 
 If no API or local MT backend is available or desired, use a manual phrase-map flow:
 
@@ -168,9 +173,9 @@ If no API or local MT backend is available or desired, use a manual phrase-map f
 
 ### 3. Rebuild Layout
 
-Default target: `.docx`
+Default target: `.typ`
 
-Use Word-style paragraph layout for legal documents unless HTML, React, canvas, or another intermediate layout format is materially better for the specific page class. The rebuilt document should:
+Use paragraph-first structured layout for legal documents unless HTML, React, canvas, or another intermediate layout format is materially better for the specific page class. The rebuilt document should:
 
 - preserve page count when feasible
 - preserve section hierarchy
@@ -192,8 +197,8 @@ Do not force the entire document through one strategy if that strategy is obviou
 
 Current bundled rebuild path:
 
-- `scripts/rebuild_docx.py`
-- `scripts/export_pdf.py`
+- `scripts/rebuild_typst.py`
+- `scripts/export_typst_pdf.py`
 - `scripts/build_final_pdf.py`
 - `scripts/run_babel_copy.py`
 
@@ -207,17 +212,18 @@ These fields are written into `run-manifest.json` so `babel-copy-qa` and `babel-
 
 This now supports:
 
-- page-size-aware `.docx` rebuild
+- page-size-aware Typst rebuild
 - visual-first serif / sans fallback selection carried from extraction into rebuild
 - detected table and form reconstruction
 - signature and stamp image crops placed back into table cells
 - manual block-translation templates for rebuild-first workflows
 - adaptive final PDF assembly:
   - template-preserving overlay for branded native-text or scan-heavy pages
-  - per-page `.docx` rebuild fallback for form/table/signature pages inside the same document
+  - per-page structured rebuild fallback for form/table/signature pages inside the same document
   - translated repeated footers and headers as real translatable blocks
 - end-to-end runner:
-  - extract -> `codex exec` translation -> hybrid final PDF build -> rendered comparison report -> check notes
+  - extract -> CLI/API translation -> hybrid final PDF build -> rendered comparison report -> check notes
+  - `--translation-provider auto|codex|claude|openai|anthropic|google` when you need to force one path
   - `--ocr-engine tesseract|paddle` with optional `--paddle-python` for a separate PaddleOCR env
 
 It is still not a fully page-faithful legal-document engine, but it now covers the high-leverage structure needed for form-heavy signature pages.
@@ -299,17 +305,17 @@ This skill now ships its own bundled scripts:
 - `scripts/extract_document.py`: source text, block manifest, and asset extraction
 - `scripts/paddle_ocr_bridge.py`: PaddleOCR sidecar used when `--ocr-engine paddle` is selected
 - `scripts/babel_copy_manual.py`: manual extract/apply bootstrap flow
-- `scripts/rebuild_docx.py`: minimal `.docx` rebuild from translated blocks
-- `scripts/export_pdf.py`: LibreOffice-based PDF export
+- `scripts/rebuild_typst.py`: minimal `.typ` rebuild from translated blocks
+- `scripts/export_typst_pdf.py`: Typst CLI PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
 - `scripts/setup_paddle_env.sh`: creates a dedicated PaddleOCR virtualenv for A/B runs
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
-- `scripts/translate_blocks_codex.py`: block translation through `codex exec`
+- `scripts/translate_blocks_codex.py`: block translation through Codex, Claude Code, matching API fallbacks, or Google Translate
 
 Current limitation:
 
-- the legacy manual apply path still uses direct PDF composition instead of the rebuild-first `.docx` path
+- the legacy manual apply path still uses direct PDF composition instead of the rebuild-first Typst path
 - OCR cleanup still needs tightening for noisy artifacts and damaged headings
 - lightweight tables without visible borders still rely on overlap-preservation heuristics more than true semantic reconstruction
 - signature images are reinserted with cell-aware placement, not true floating-page anchors

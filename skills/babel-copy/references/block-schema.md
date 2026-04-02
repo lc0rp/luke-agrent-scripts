@@ -12,7 +12,7 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
   "font_baseline": {
     "family_class": "serif",
     "pdf_font_name": "Times-Roman",
-    "docx_font_name": "Times New Roman",
+    "text_font_name": "Times New Roman",
     "source": "visual_override",
     "reason": "Chosen from visual inspection of representative page renders."
   },
@@ -131,7 +131,7 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 - If `font_baseline` conflicts with weak extracted font metadata or a source font that is not embedded / not reusable, the visual baseline should win.
 - `font_baseline.family_class` should be `serif` or `sans`.
 - PDF overlay fallback mapping is `serif -> Times-Roman`, `sans -> helv`.
-- DOCX rebuild fallback mapping is `serif -> Times New Roman`, `sans -> Arial`.
+- Structured rebuild fallback mapping is `serif -> Times New Roman`, `sans -> Arial`.
 - `header` and `footer` text should be translated unless they are purely non-linguistic marks.
 - `keep_original: true` is for non-text or non-translatable visual elements, not for repeated boilerplate text.
 - `style.font_name`, `style.flags`, `style.color`, and `style.text_fill_color` are block-level summaries for native text only, not full per-span style runs.
@@ -141,7 +141,7 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 - For numeric fields, a string like `"+4"` or `"-1.5"` means a relative delta; a numeric literal means absolute replacement.
 - `custom_override.bbox.x` / `y` shift the whole block, while `w` / `h` grow or shrink its width or height.
 - `custom_override.bbox.x0` / `y0` / `x1` / `y1` can override or delta individual edges directly.
-- Overlay pages honor bbox nudges, font-size changes, alignment overrides, color overrides, and text changes. DOCX rebuild pages honor text/style/alignment overrides, but not absolute PDF positioning with the same fidelity.
+- Overlay pages honor bbox nudges, font-size changes, alignment overrides, color overrides, and text changes. Structured rebuild pages honor text/style/alignment overrides, but not absolute PDF positioning with the same fidelity.
 
 ## Keep Original
 
