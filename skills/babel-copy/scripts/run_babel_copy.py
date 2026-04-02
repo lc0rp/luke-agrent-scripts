@@ -159,6 +159,8 @@ def main() -> int:
             extract_cmd.extend(["--ocr-engine", args.ocr_engine])
         if args.paddle_python:
             extract_cmd.extend(["--paddle-python", args.paddle_python])
+        if args.translation_provider:
+            extract_cmd.extend(["--translation-provider", args.translation_provider])
         run_step(extract_cmd)
 
         blocks_json = extract_dir / "blocks.json"

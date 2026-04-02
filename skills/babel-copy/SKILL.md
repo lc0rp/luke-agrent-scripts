@@ -144,6 +144,8 @@ Current translation fallback order for `scripts/translate_blocks_codex.py`:
 3. matching inherited API key from the process environment
 4. Google Translate fallback
 
+Extraction-time fragment merge in `scripts/extract_document.py` should use the same Codex-or-Claude runtime-family selection, including explicit `--translation-provider` overrides and the same auto-detection rules when the provider stays on `auto`.
+
 Auth and fallback behavior:
 
 - before each CLI call, log the active translation runtime in a grep-friendly structured line

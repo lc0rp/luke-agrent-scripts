@@ -14,6 +14,14 @@ from statistics import median
 import fitz
 import numpy as np
 from PIL import Image
+from translation_runtime import (
+    TRANSLATION_PROVIDER_CHOICES,
+    anthropic_model_name,
+    claude_cli_flags,
+    codex_model_name,
+    detect_runtime_mode,
+    translation_provider,
+)
 
 try:
     from syntok import segmenter as syntok_segmenter
@@ -68,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--paddle-python", help="Python interpreter from a separate Paddle OCR env."
     )
+    parser.add_argument("--translation-provider", choices=TRANSLATION_PROVIDER_CHOICES)
     return parser.parse_args()
 
 
@@ -1424,6 +1433,16 @@ def codex_fragment_merge_model() -> str | None:
     return value or None
 
 
+def fragment_merge_model(runtime_mode: str) -> str | None:
+    explicit = codex_fragment_merge_model()
+    if explicit:
+        return explicit
+    if runtime_mode == "claude":
+        return anthropic_model_name(None)
+    model = codex_model_name(None)
+    return None if model == "default" else model
+
+
 def build_fragment_merge_prompt(candidates: list[dict]) -> str:
     payload = []
     for item in candidates:
@@ -1496,7 +1515,7 @@ def run_codex_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, boo
             str(output_file),
             "-",
         ]
-        model = codex_fragment_merge_model()
+        model = fragment_merge_model("codex")
         if model:
             cmd.extend(["--model", model])
         subprocess.run(
@@ -1505,8 +1524,41 @@ def run_codex_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, boo
         return parse_fragment_merge_response(output_file.read_text())
 
 
+def run_claude_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, bool]:
+    cmd = [
+        "claude",
+        *claude_cli_flags(),
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        str(cwd),
+    ]
+    if "-p" in cmd or "--print" in cmd:
+        cmd.extend(["--tools", ""])
+    model = fragment_merge_model("claude")
+    if model:
+        cmd.extend(["--model", model])
+    completed = subprocess.run(
+        cmd,
+        input=build_fragment_merge_prompt(candidates),
+        text=True,
+        cwd=str(cwd),
+        capture_output=True,
+        check=True,
+    )
+    return parse_fragment_merge_response(completed.stdout)
+
+
+def run_fragment_merge(
+    candidates: list[dict], *, cwd: Path, provider: str | None = None
+) -> dict[str, bool]:
+    runtime_mode = detect_runtime_mode(cwd, translation_provider(provider))
+    if runtime_mode == "claude":
+        return run_claude_fragment_merge(candidates, cwd=cwd)
+    return run_codex_fragment_merge(candidates, cwd=cwd)
+
+
 def llm_fragment_merge_decisions(
-    page_blocks: list[dict], cwd: Path
+    page_blocks: list[dict], cwd: Path, provider: str | None = None
 ) -> set[tuple[str, str]]:
     if not llm_fragment_merge_enabled():
         return set()
@@ -1545,7 +1597,7 @@ def llm_fragment_merge_decisions(
     if not candidates:
         return decisions
     try:
-        raw_decisions = run_codex_fragment_merge(candidates, cwd=cwd)
+        raw_decisions = run_fragment_merge(candidates, cwd=cwd, provider=provider)
     except Exception:
         raw_decisions = {}
     for candidate in candidates:
@@ -2120,7 +2172,12 @@ def main() -> int:
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
         page_blocks = merge_paragraph_fragments(
-            page_blocks, llm_fragment_merge_decisions(page_blocks, cwd=input_pdf.parent)
+            page_blocks,
+            llm_fragment_merge_decisions(
+                page_blocks,
+                cwd=input_pdf.parent,
+                provider=args.translation_provider,
+            ),
         )
         page_blocks = dedupe_ocr_blocks(page_blocks)
         mark_textual_table_like_rows(page_blocks)

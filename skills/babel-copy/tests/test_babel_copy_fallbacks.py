@@ -11,7 +11,18 @@ from pathlib import Path
 from unittest import mock
 
 
-def load_module(module_name: str, path: Path):
+def load_module(
+    module_name: str,
+    path: Path,
+    *,
+    stub_modules: dict[str, types.ModuleType] | None = None,
+):
+    parent = str(path.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    if stub_modules:
+        for name, module in stub_modules.items():
+            sys.modules.setdefault(name, module)
     if "openai" not in sys.modules:
         fake_openai = types.ModuleType("openai")
 
@@ -30,13 +41,84 @@ def load_module(module_name: str, path: Path):
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+TRANSLATION_RUNTIME = load_module(
+    "test_translation_runtime",
+    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translation_runtime.py",
+)
 TRANSLATE_BLOCKS_CODEX = load_module(
     "test_translate_blocks_codex",
     REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_codex.py",
 )
+RUN_BABEL_COPY = load_module(
+    "test_run_babel_copy",
+    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "run_babel_copy.py",
+)
 RUN_OPTIMIZATION_CYCLE = load_module(
     "test_run_optimization_cycle",
     REPO_ROOT / "skills" / "babel-copy-optimizer" / "scripts" / "run_optimization_cycle.py",
+)
+
+
+def make_extract_document_stubs() -> dict[str, types.ModuleType]:
+    fake_core = types.ModuleType("core")
+    passthrough_names = [
+        "build_font_baseline",
+        "classify_page",
+        "extract_native_regions",
+        "extract_ocr_regions",
+        "font_baseline_from_payload",
+        "infer_alignment",
+        "normalize_font_family_class",
+        "ocr_image_to_string",
+    ]
+    for name in passthrough_names:
+        setattr(fake_core, name, lambda *args, **kwargs: None)
+    fake_core.clean_text = lambda text: str(text).strip()
+    fake_core.normalize_ocr_engine = lambda value: value or "tesseract"
+    fake_core.parse_page_selection = lambda pages, count: set(range(1, count + 1))
+    fake_core.split_leading_marker = lambda text: ("", text)
+
+    fake_fitz = types.ModuleType("fitz")
+
+    class DummyRect:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class DummyPoint:
+        def __init__(self, x, y):
+            self.x = x
+            self.y = y
+
+    fake_fitz.Rect = DummyRect
+    fake_fitz.Point = DummyPoint
+
+    fake_numpy = types.ModuleType("numpy")
+    fake_numpy.array = lambda value: value
+    fake_numpy.where = lambda value: ([], [])
+
+    fake_pil = types.ModuleType("PIL")
+    fake_pil_image = types.ModuleType("PIL.Image")
+
+    class DummyImage:
+        pass
+
+    fake_pil_image.Image = DummyImage
+    fake_pil.Image = fake_pil_image
+
+    return {
+        "core": fake_core,
+        "fitz": fake_fitz,
+        "numpy": fake_numpy,
+        "PIL": fake_pil,
+        "PIL.Image": fake_pil_image,
+    }
+
+
+EXTRACT_DOCUMENT = load_module(
+    "test_extract_document",
+    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "extract_document.py",
+    stub_modules=make_extract_document_stubs(),
 )
 
 
@@ -118,7 +200,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             (cwd / ".env").write_text("ANTHROPIC_API_KEY=dotenv-key-12345678901234567890\n")
             with (
                 mock.patch.dict(os.environ, {}, clear=True),
-                mock.patch.object(TRANSLATE_BLOCKS_CODEX.shutil, "which", side_effect=lambda name: "/usr/bin/" + name),
+                mock.patch.object(TRANSLATION_RUNTIME.shutil, "which", side_effect=lambda name: "/usr/bin/" + name),
             ):
                 mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode(cwd, "auto")
         self.assertEqual(mode, "claude")
@@ -138,6 +220,82 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertIn("--output-format", cmd)
         self.assertIn("--tools", cmd)
         self.assertEqual(run_subprocess.call_args.kwargs["cwd"], "/tmp/work")
+
+
+class ExtractDocumentTests(unittest.TestCase):
+    def test_run_fragment_merge_dispatches_to_claude_runtime(self) -> None:
+        candidates = [{"pair_id": "p1->p2"}]
+        with (
+            mock.patch.object(EXTRACT_DOCUMENT, "translation_provider", return_value="auto"),
+            mock.patch.object(EXTRACT_DOCUMENT, "detect_runtime_mode", return_value="claude"),
+            mock.patch.object(
+                EXTRACT_DOCUMENT,
+                "run_claude_fragment_merge",
+                return_value={"p1->p2": True},
+            ) as run_claude,
+            mock.patch.object(EXTRACT_DOCUMENT, "run_codex_fragment_merge") as run_codex,
+        ):
+            decisions = EXTRACT_DOCUMENT.run_fragment_merge(
+                candidates,
+                cwd=Path("/tmp/work"),
+                provider="auto",
+            )
+        self.assertEqual(decisions, {"p1->p2": True})
+        run_claude.assert_called_once_with(candidates, cwd=Path("/tmp/work"))
+        run_codex.assert_not_called()
+
+
+class RunBabelCopyTests(unittest.TestCase):
+    def test_main_passes_translation_provider_to_extract_and_translate_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            input_pdf = workspace / "sample.pdf"
+            input_pdf.write_bytes(b"%PDF-1.4\n")
+            output_dir = workspace / "out"
+            commands: list[list[str]] = []
+
+            def fake_run_step(cmd: list[str]) -> None:
+                commands.append(cmd)
+                if cmd[1].endswith("extract_document.py"):
+                    extract_dir = output_dir / "extracted"
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    (extract_dir / "blocks.json").write_text(
+                        json.dumps(
+                            {
+                                "page_count": 1,
+                                "pages": [],
+                                "blocks": [],
+                                "font_baseline": {},
+                            }
+                        )
+                    )
+
+            with mock.patch.object(RUN_BABEL_COPY, "run_step", side_effect=fake_run_step):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run_babel_copy.py",
+                        str(input_pdf),
+                        "--output-dir",
+                        str(output_dir),
+                        "--translation-provider",
+                        "claude",
+                        "--skip-compare",
+                    ],
+                ):
+                    exit_code = RUN_BABEL_COPY.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertGreaterEqual(len(commands), 3)
+        extract_cmd = commands[0]
+        translate_cmd = commands[1]
+        self.assertEqual(
+            extract_cmd[extract_cmd.index("--translation-provider") + 1], "claude"
+        )
+        self.assertEqual(
+            translate_cmd[translate_cmd.index("--provider") + 1], "claude"
+        )
 
 
 def subprocess_completed(stdout: str):
