@@ -74,7 +74,6 @@ def make_extract_document_stubs() -> dict[str, types.ModuleType]:
     for name in passthrough_names:
         setattr(fake_core, name, lambda *args, **kwargs: None)
     fake_core.clean_text = lambda text: str(text).strip()
-    fake_core.normalize_ocr_engine = lambda value: value or "tesseract"
     fake_core.parse_page_selection = lambda pages, count: set(range(1, count + 1))
     fake_core.split_leading_marker = lambda text: ("", text)
 

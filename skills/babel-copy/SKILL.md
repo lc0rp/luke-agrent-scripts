@@ -106,10 +106,8 @@ Run it to create:
 
 OCR backend options:
 
-- default backend is Tesseract
-- use `scripts/extract_document.py --ocr-engine paddle --paddle-python /path/to/.venv-babel-paddle/bin/python` to A/B test PaddleOCR on the same document
-- use separate output directories when comparing OCR backends so manifests and QA renders stay isolated
-- `scripts/setup_paddle_env.sh` creates a dedicated `.venv-babel-paddle` without disturbing the main babel-copy environment
+- OCR is Tesseract-only
+- use separate output directories when comparing extraction changes so manifests and QA renders stay isolated
 
 Sentence and paragraph boundary help:
 
@@ -226,7 +224,6 @@ This now supports:
 - end-to-end runner:
   - extract -> CLI/API translation -> hybrid final PDF build -> rendered comparison report -> check notes
   - `--translation-provider auto|codex|claude|openai|anthropic|google` when you need to force one path
-  - `--ocr-engine tesseract|paddle` with optional `--paddle-python` for a separate PaddleOCR env
 
 It is still not a fully page-faithful legal-document engine, but it now covers the high-leverage structure needed for form-heavy signature pages.
 
@@ -305,13 +302,11 @@ This skill now ships its own bundled scripts:
 
 - `scripts/core.py`: local extraction and composition primitives
 - `scripts/extract_document.py`: source text, block manifest, and asset extraction
-- `scripts/paddle_ocr_bridge.py`: PaddleOCR sidecar used when `--ocr-engine paddle` is selected
 - `scripts/babel_copy_manual.py`: manual extract/apply bootstrap flow
 - `scripts/rebuild_typst.py`: minimal `.typ` rebuild from translated blocks
 - `scripts/export_typst_pdf.py`: Typst CLI PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
-- `scripts/setup_paddle_env.sh`: creates a dedicated PaddleOCR virtualenv for A/B runs
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
 - `scripts/translate_blocks_codex.py`: block translation through Codex, Claude Code, matching API fallbacks, or Google Translate
 

@@ -37,7 +37,6 @@ from core import (
     font_baseline_from_payload,
     infer_alignment,
     normalize_font_family_class,
-    normalize_ocr_engine,
     ocr_image_to_string,
     parse_page_selection,
     split_leading_marker,
@@ -67,14 +66,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=144)
     parser.add_argument(
         "--font-baseline", help="Visual fallback font family override: serif or sans."
-    )
-    parser.add_argument(
-        "--ocr-engine",
-        choices=("tesseract", "paddle"),
-        default=normalize_ocr_engine(None),
-    )
-    parser.add_argument(
-        "--paddle-python", help="Python interpreter from a separate Paddle OCR env."
     )
     parser.add_argument("--translation-provider", choices=TRANSLATION_PROVIDER_CHOICES)
     return parser.parse_args()
@@ -1756,9 +1747,6 @@ def best_text_from_top_crop(
     cell_rect: fitz.Rect,
     page_rect: fitz.Rect,
     current_text: str,
-    *,
-    ocr_engine: str,
-    paddle_python: str | None,
 ) -> str:
     width, height = image.size
     candidates = [normalize_cell_ocr_text(current_text)]
@@ -1778,8 +1766,6 @@ def best_text_from_top_crop(
         candidate = normalize_cell_ocr_text(
             ocr_image_to_string(
                 image.crop((x0, y0, x1, y1)),
-                engine=ocr_engine,
-                paddle_python=paddle_python,
                 psm="6",
             )
         )
@@ -1919,9 +1905,6 @@ def fill_empty_cells_with_ocr(
     page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
-    *,
-    ocr_engine: str,
-    paddle_python: str | None,
 ) -> None:
     image = Image.open(render_path).convert("RGB")
     width, height = image.size
@@ -1940,8 +1923,6 @@ def fill_empty_cells_with_ocr(
             cropped = image.crop((x0, y0, x1, y1))
             extracted = ocr_image_to_string(
                 cropped,
-                engine=ocr_engine,
-                paddle_python=paddle_python,
                 psm="6",
             )
             if not extracted or is_probable_artifact(extracted):
@@ -1984,9 +1965,6 @@ def enrich_tall_cells_with_ocr(
     page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
-    *,
-    ocr_engine: str,
-    paddle_python: str | None,
 ) -> None:
     image = Image.open(render_path).convert("RGB")
     blocks_by_id = {block["id"]: block for block in page_blocks}
@@ -2006,8 +1984,6 @@ def enrich_tall_cells_with_ocr(
                 cell_rect,
                 page_rect,
                 current_text,
-                ocr_engine=ocr_engine,
-                paddle_python=paddle_python,
             )
             if score_cell_ocr_text(enriched) > score_cell_ocr_text(current_text):
                 block["text"] = enriched
@@ -2066,7 +2042,6 @@ def main() -> int:
 
     doc = fitz.open(input_pdf)
     selected = parse_page_selection(args.pages, doc.page_count)
-    ocr_engine = normalize_ocr_engine(args.ocr_engine)
     all_blocks = []
     all_assets = []
     pages_payload = []
@@ -2079,16 +2054,13 @@ def main() -> int:
         page = doc[page_index]
         page_type, region_source = classify_page(page)
         effective_region_source = (
-            region_source if region_source == "native" else f"ocr_{ocr_engine}"
+            region_source if region_source == "native" else "ocr_tesseract"
         )
         regions = (
             extract_native_regions(page)
             if region_source == "native"
             else extract_ocr_regions(
-                page,
-                args.magnify_factor if region_source == "ocr" else 1.0,
-                engine=ocr_engine,
-                paddle_python=args.paddle_python,
+                page, args.magnify_factor if region_source == "ocr" else 1.0
             )
         )
         regions = [region for region in regions if clean_text(region.text)]
@@ -2158,16 +2130,12 @@ def main() -> int:
             page.rect,
             page_tables,
             page_blocks,
-            ocr_engine=ocr_engine,
-            paddle_python=args.paddle_python,
         )
         enrich_tall_cells_with_ocr(
             render_path,
             page.rect,
             page_tables,
             page_blocks,
-            ocr_engine=ocr_engine,
-            paddle_python=args.paddle_python,
         )
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
@@ -2251,7 +2219,6 @@ def main() -> int:
         "input_pdf": str(input_pdf),
         "page_count": len(pages_payload),
         "block_count": len(all_blocks),
-        "ocr_engine": ocr_engine,
         "font_baseline": font_baseline,
         "pages": pages_payload,
         "blocks": all_blocks,

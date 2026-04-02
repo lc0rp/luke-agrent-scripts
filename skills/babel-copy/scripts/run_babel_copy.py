@@ -27,8 +27,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--magnify-factor", type=float, default=2.0)
     parser.add_argument("--dpi", type=int, default=144)
     parser.add_argument("--font-baseline", help="Visual fallback font family override: serif or sans.")
-    parser.add_argument("--ocr-engine", choices=("tesseract", "paddle"), default="tesseract")
-    parser.add_argument("--paddle-python", help="Python interpreter from a separate Paddle OCR env.")
     parser.add_argument("--model")
     parser.add_argument("--translation-provider", choices=("auto", "codex", "claude", "openai", "anthropic", "google"))
     parser.add_argument("--batch-size", type=int, default=18)
@@ -88,14 +86,14 @@ def recommend_pages(payload: dict) -> list[int]:
     return ordered
 
 
-def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: Path, notes_path: Path, ocr_engine: str) -> None:
+def write_check_notes(extract_payload: dict, translated_pdf: Path, compare_dir: Path, notes_path: Path) -> None:
     font_baseline = extract_payload.get("font_baseline", {})
     lines = [
         "# Babel Copy Check Notes",
         "",
         f"- Final PDF: `{translated_pdf}`",
         f"- Source page count: {extract_payload.get('page_count')}",
-        f"- OCR engine: `{ocr_engine}`",
+        "- OCR backend: `tesseract`",
         f"- Font baseline: `{font_baseline.get('family_class', 'unknown')}` via `{font_baseline.get('source', 'unknown')}`",
         "",
         "## Recommended Visual Checks",
@@ -155,10 +153,6 @@ def main() -> int:
             extract_cmd.extend(["--pages", args.pages])
         if args.font_baseline:
             extract_cmd.extend(["--font-baseline", args.font_baseline])
-        if args.ocr_engine:
-            extract_cmd.extend(["--ocr-engine", args.ocr_engine])
-        if args.paddle_python:
-            extract_cmd.extend(["--paddle-python", args.paddle_python])
         if args.translation_provider:
             extract_cmd.extend(["--translation-provider", args.translation_provider])
         run_step(extract_cmd)
@@ -209,7 +203,7 @@ def main() -> int:
 
         extract_payload = json.loads(blocks_json.read_text())
         check_notes = output_dir / "check-notes.md"
-        write_check_notes(extract_payload, output_pdf, compare_dir, check_notes, args.ocr_engine)
+        write_check_notes(extract_payload, output_pdf, compare_dir, check_notes)
 
         manifest = {
             "schema_version": "1.0",
@@ -230,8 +224,6 @@ def main() -> int:
             "magnify_factor": args.magnify_factor,
             "dpi": args.dpi,
             "font_baseline": args.font_baseline,
-            "ocr_engine": args.ocr_engine,
-            "paddle_python": args.paddle_python,
             "model": args.model,
             "translation_provider": args.translation_provider,
             "batch_size": args.batch_size,
