@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# [tool.uv]
+# exclude-newer = "2026-03-19T14:37:22Z"
+# ///
 from __future__ import annotations
 
 import argparse

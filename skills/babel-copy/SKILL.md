@@ -42,6 +42,34 @@ The pipeline is:
 4. place preserved non-text assets
 5. export PDF and run visual QA
 
+## Dependency Bootstrap
+
+Before doing anything:
+
+1. Check that `uv` is installed.
+2. If it is missing, install it using Astral's current instructions:
+   - macOS or Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows PowerShell: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+   - fallback when `curl` is unavailable: `wget -qO- https://astral.sh/uv/install.sh | sh`
+3. If `uv` still cannot be installed or executed, abort.
+
+Execution rules:
+
+- run every babel-copy Python entrypoint with `uv run --script`
+- do not call babel-copy scripts with `python`, `python3`, or `sys.executable`
+- when adding a new babel-copy script or repairing one that lacks inline metadata, run:
+  - `uv init --script <script.py>`
+  - add all direct dependencies to the script metadata
+  - `uv lock --script <script.py>`
+- distribute the matching `<script>.lock` file with the script
+- every script must include inline `# /// script` metadata with:
+  - `requires-python`
+  - all direct Python dependencies
+  - `[tool.uv]`
+  - `exclude-newer = "..."` using an RFC 3339 timestamp
+
+Current babel-copy scripts already ship inline uv metadata and adjacent lockfiles. Preserve both when editing dependencies.
+
 ## Workflow
 
 ### 1. Extract
@@ -75,7 +103,7 @@ Choose a document-level fallback font baseline from those preview renders before
 - visually classify the document body text as `serif` or `sans`
 - store that choice in top-level `font_baseline`
 - when visual inspection conflicts with weak native metadata or a non-embedded source font, visual inspection wins
-- use `scripts/extract_document.py --font-baseline serif|sans` or `scripts/run_babel_copy.py --font-baseline serif|sans` when you have already made the visual call
+- use `uv run --script scripts/extract_document.py --font-baseline serif|sans` or `uv run --script scripts/run_babel_copy.py --font-baseline serif|sans` when you have already made the visual call
 
 Baseline mapping:
 
@@ -94,7 +122,7 @@ If the page is a hard scan, preserve both the extracted text blocks and the rend
 
 Primary extractor:
 
-- `scripts/extract_document.py`
+- `uv run --script scripts/extract_document.py`
 
 Run it to create:
 
@@ -112,7 +140,7 @@ OCR backend options:
 Sentence and paragraph boundary help:
 
 - `syntok` is used when available to add a lightweight sentence-boundary signal during fragment merging
-- install `syntok` into the main babel-copy environment if you want that signal active during extraction
+- `scripts/extract_document.py` declares it inline, so `uv run --script` will install it on demand
 - it is a helper, not the primary structure engine; geometry, typography, and visual QA still win
 
 ### 2. Translate
@@ -131,7 +159,7 @@ Translate with context:
 - translate headers, footers, table headers, labels, captions, and body text
 - preserve consistent glossary choices across the entire document, not just one page
 
-Current translation fallback order for `scripts/translate_blocks_codex.py`:
+Current translation fallback order for `uv run --script scripts/translate_blocks_codex.py`:
 
 1. detect runtime mode and choose the matching CLI family:
    - Codex mode: `codex exec`
@@ -142,7 +170,7 @@ Current translation fallback order for `scripts/translate_blocks_codex.py`:
 3. matching inherited API key from the process environment
 4. Google Translate fallback
 
-Extraction-time fragment merge in `scripts/extract_document.py` should use the same Codex-or-Claude runtime-family selection, including explicit `--translation-provider` overrides and the same auto-detection rules when the provider stays on `auto`.
+Extraction-time fragment merge in `uv run --script scripts/extract_document.py` should use the same Codex-or-Claude runtime-family selection, including explicit `--translation-provider` overrides and the same auto-detection rules when the provider stays on `auto`.
 
 Auth and fallback behavior:
 
@@ -157,7 +185,7 @@ Auth and fallback behavior:
 
 Resume and loop-safety expectations:
 
-- `scripts/run_babel_copy.py` writes an `active-run.json` marker while a document job is still in flight
+- `uv run --script scripts/run_babel_copy.py` writes an `active-run.json` marker while a document job is still in flight
 - `scripts/run_optimization_cycle.py release` now refuses to release a cycle when active babel-copy workers are still running, unless explicitly forced
 - this prevents a temporary CLI or API usage-limit event from aborting the cycle while an OpenAI, Anthropic, or Google fallback translation is still progressing
 - if a run stops mid-cycle, the next automation pass should inspect existing attempt artifacts first and continue from the latest viable translated output instead of assuming the cycle is cleanly aborted
@@ -197,12 +225,12 @@ Do not force the entire document through one strategy if that strategy is obviou
 
 Current bundled rebuild path:
 
-- `scripts/rebuild_typst.py`
-- `scripts/export_typst_pdf.py`
-- `scripts/build_final_pdf.py`
-- `scripts/run_babel_copy.py`
+- `uv run --script scripts/rebuild_typst.py`
+- `uv run --script scripts/export_typst_pdf.py`
+- `uv run --script scripts/build_final_pdf.py`
+- `uv run --script scripts/run_babel_copy.py`
 
-For automation loops, prefer calling `scripts/run_babel_copy.py` with:
+For automation loops, prefer calling `uv run --script scripts/run_babel_copy.py` with:
 
 - `--document-id`
 - `--cycle-id`
@@ -258,7 +286,7 @@ Run a check step before declaring success:
 
 - render preview pages before layout decisions
 - render the final PDF after composition
-- compare source vs translated renders side by side with `scripts/compare_rendered_pages.py`
+- compare source vs translated renders side by side with `uv run --script scripts/compare_rendered_pages.py`
 - use judgment on the rendered images; do not trust the pipeline just because it completed
 
 If visual QA reveals overlapping text or any other local layout problem that does not justify changing extraction or renderer logic, use a targeted post-process override pass:
@@ -272,8 +300,8 @@ If visual QA reveals overlapping text or any other local layout problem that doe
   - use explicit signed deltas like `+12` or `-4` when you want relative movement or expansion
   - if you need an absolute numeric target, pass it as a quoted numeric string such as `"533.0"` rather than `533.0`
   - do not assume bare numeric JSON values are absolute coordinates
-- rerun `scripts/build_final_pdf.py`
-- rerun `scripts/compare_rendered_pages.py`
+- rerun `uv run --script scripts/build_final_pdf.py`
+- rerun `uv run --script scripts/compare_rendered_pages.py`
 - prefer the smallest override set that fixes the visible issue
 
 Use overrides for document-specific cleanup, not for systematic bugs that should be fixed in the pipeline itself.
@@ -309,6 +337,8 @@ This skill now ships its own bundled scripts:
 - `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
 - `scripts/translate_blocks_codex.py`: block translation through Codex, Claude Code, matching API fallbacks, or Google Translate
+- each Python script includes inline uv metadata and should be invoked with `uv run --script`
+- each Python script is expected to ship with an adjacent `.lock` file
 
 Current limitation:
 

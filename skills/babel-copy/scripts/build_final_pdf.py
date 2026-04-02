@@ -1,11 +1,22 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "Pillow==12.1.1",
+#   "PyMuPDF==1.27.2.2",
+#   "pytesseract==0.3.13",
+# ]
+# [tool.uv]
+# exclude-newer = "2026-03-19T14:37:22Z"
+# ///
 from __future__ import annotations
 
 import argparse
 import difflib
 import json
+import os
+import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -21,6 +32,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("translated_blocks_json")
     parser.add_argument("--output-pdf", required=True)
     return parser.parse_args()
+
+
+def resolve_uv_executable() -> str:
+    candidates = []
+    env_value = str(os.environ.get("UV_BIN") or "").strip()
+    if env_value:
+        candidates.append(env_value)
+    candidates.append(str(Path.home() / ".local" / "bin" / "uv"))
+    which_value = shutil.which("uv")
+    if which_value:
+        candidates.append(which_value)
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise SystemExit(
+        "Missing dependency: uv. Install it first, then run babel-copy scripts with `uv run --script`."
+    )
+
+
+def uv_script_command(script_path: Path, *args: str) -> list[str]:
+    return [
+        resolve_uv_executable(),
+        "run",
+        "--script",
+        str(script_path),
+        *args,
+    ]
 
 
 def asset_map(payload: dict) -> dict[str, dict]:
@@ -474,12 +512,22 @@ def render_page_via_typst(
         page_json = tmp_dir / f"page-{page_number:03d}.json"
         page_json.write_text(json.dumps(page_payload, indent=2, ensure_ascii=False))
         subprocess.run(
-            [sys.executable, str(Path(script_dir / "rebuild_typst.py")), str(page_json), "--output-typ", str(typ_path)],
+            uv_script_command(
+                Path(script_dir / "rebuild_typst.py"),
+                str(page_json),
+                "--output-typ",
+                str(typ_path),
+            ),
             check=True,
         )
         rendered_pdf = tmp_dir / f"{typ_path.stem}.pdf"
         subprocess.run(
-            [sys.executable, str(Path(script_dir / "export_typst_pdf.py")), str(typ_path), "--output-pdf", str(rendered_pdf)],
+            uv_script_command(
+                Path(script_dir / "export_typst_pdf.py"),
+                str(typ_path),
+                "--output-pdf",
+                str(rendered_pdf),
+            ),
             check=True,
         )
         output_pdf.parent.mkdir(parents=True, exist_ok=True)

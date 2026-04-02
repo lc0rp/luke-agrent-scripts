@@ -1,12 +1,18 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# [tool.uv]
+# exclude-newer = "2026-03-19T14:37:22Z"
+# ///
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
-import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +42,33 @@ def parse_args() -> argparse.Namespace:
 
 def run_step(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
+
+
+def resolve_uv_executable() -> str:
+    candidates = []
+    env_value = str(os.environ.get("UV_BIN") or "").strip()
+    if env_value:
+        candidates.append(env_value)
+    candidates.append(str(Path.home() / ".local" / "bin" / "uv"))
+    which_value = shutil.which("uv")
+    if which_value:
+        candidates.append(which_value)
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise SystemExit(
+        "Missing dependency: uv. Install it first, then run babel-copy scripts with `uv run --script`."
+    )
+
+
+def uv_script_command(script_path: Path, *args: str) -> list[str]:
+    return [
+        resolve_uv_executable(),
+        "run",
+        "--script",
+        str(script_path),
+        *args,
+    ]
 
 
 def utc_now_text() -> str:
@@ -138,9 +171,8 @@ def main() -> int:
         final_dir = output_dir / "final"
         compare_dir = output_dir / "compare"
 
-        extract_cmd = [
-            sys.executable,
-            str(script_dir / "extract_document.py"),
+        extract_cmd = uv_script_command(
+            script_dir / "extract_document.py",
             str(input_pdf),
             "--output-dir",
             str(extract_dir),
@@ -148,7 +180,7 @@ def main() -> int:
             str(args.magnify_factor),
             "--dpi",
             str(args.dpi),
-        ]
+        )
         if args.pages:
             extract_cmd.extend(["--pages", args.pages])
         if args.font_baseline:
@@ -159,9 +191,8 @@ def main() -> int:
 
         blocks_json = extract_dir / "blocks.json"
         translated_json = translated_dir / "translated_blocks.json"
-        translate_cmd = [
-            sys.executable,
-            str(script_dir / "translate_blocks_codex.py"),
+        translate_cmd = uv_script_command(
+            script_dir / "translate_blocks_codex.py",
             str(blocks_json),
             "--output-json",
             str(translated_json),
@@ -171,7 +202,7 @@ def main() -> int:
             args.target_lang,
             "--batch-size",
             str(args.batch_size),
-        ]
+        )
         if args.model:
             translate_cmd.extend(["--model", args.model])
         if args.translation_provider:
@@ -180,25 +211,23 @@ def main() -> int:
 
         final_dir.mkdir(parents=True, exist_ok=True)
         output_pdf = final_dir / f"{input_pdf.stem}.{args.target_lang.lower().replace(' ', '-')}.pdf"
-        build_cmd = [
-            sys.executable,
-            str(script_dir / "build_final_pdf.py"),
+        build_cmd = uv_script_command(
+            script_dir / "build_final_pdf.py",
             str(input_pdf),
             str(translated_json),
             "--output-pdf",
             str(output_pdf),
-        ]
+        )
         run_step(build_cmd)
 
         if not args.skip_compare:
-            compare_cmd = [
-                sys.executable,
-                str(script_dir / "compare_rendered_pages.py"),
+            compare_cmd = uv_script_command(
+                script_dir / "compare_rendered_pages.py",
                 str(input_pdf),
                 str(output_pdf),
                 "--output-dir",
                 str(compare_dir),
-            ]
+            )
             run_step(compare_cmd)
 
         extract_payload = json.loads(blocks_json.read_text())

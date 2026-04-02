@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "Pillow==12.1.1",
+#   "PyMuPDF==1.27.2.2",
+#   "pytesseract==0.3.13",
+# ]
+# [tool.uv]
+# exclude-newer = "2026-03-19T14:37:22Z"
+# ///
 from __future__ import annotations
 
 import re

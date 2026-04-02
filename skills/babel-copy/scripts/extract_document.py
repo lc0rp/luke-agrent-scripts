@@ -1,4 +1,16 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "numpy==2.4.3",
+#   "Pillow==12.1.1",
+#   "PyMuPDF==1.27.2.2",
+#   "pytesseract==0.3.13",
+#   "syntok==1.4.4",
+# ]
+# [tool.uv]
+# exclude-newer = "2026-03-19T14:37:22Z"
+# ///
 from __future__ import annotations
 
 import argparse

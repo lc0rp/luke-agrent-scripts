@@ -255,7 +255,7 @@ class RunBabelCopyTests(unittest.TestCase):
 
             def fake_run_step(cmd: list[str]) -> None:
                 commands.append(cmd)
-                if cmd[1].endswith("extract_document.py"):
+                if cmd[3].endswith("extract_document.py"):
                     extract_dir = output_dir / "extracted"
                     extract_dir.mkdir(parents=True, exist_ok=True)
                     (extract_dir / "blocks.json").write_text(
@@ -269,7 +269,14 @@ class RunBabelCopyTests(unittest.TestCase):
                         )
                     )
 
-            with mock.patch.object(RUN_BABEL_COPY, "run_step", side_effect=fake_run_step):
+            with (
+                mock.patch.object(RUN_BABEL_COPY, "run_step", side_effect=fake_run_step),
+                mock.patch.object(
+                    RUN_BABEL_COPY,
+                    "resolve_uv_executable",
+                    return_value="/opt/custom/uv",
+                ),
+            ):
                 with mock.patch.object(
                     sys,
                     "argv",
@@ -289,6 +296,16 @@ class RunBabelCopyTests(unittest.TestCase):
         self.assertGreaterEqual(len(commands), 3)
         extract_cmd = commands[0]
         translate_cmd = commands[1]
+        self.assertEqual(
+            extract_cmd[:3],
+            ["/opt/custom/uv", "run", "--script"],
+        )
+        self.assertEqual(
+            translate_cmd[:3],
+            ["/opt/custom/uv", "run", "--script"],
+        )
+        self.assertTrue(extract_cmd[3].endswith("extract_document.py"))
+        self.assertTrue(translate_cmd[3].endswith("translate_blocks_codex.py"))
         self.assertEqual(
             extract_cmd[extract_cmd.index("--translation-provider") + 1], "claude"
         )
