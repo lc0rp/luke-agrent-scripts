@@ -18,6 +18,10 @@ Use this skill when the translated document should read like a proper target-lan
 
 - Primary artifact: translated PDF
 - Final translated PDF names should be intuitive. Derive them from the original filename plus the target language short form, with an optional timestamp or counter only when needed to distinguish multiple runs of the same file. Avoid generic names such as `translated.pdf`.
+- Inside the selected output directory, create two top-level folders if they do not already exist:
+  - `wip/` for in-progress and intermediate artifacts
+  - `completed/` for final user-facing deliverables
+- Always copy completed final files into `completed/` as soon as each file is completed, even if the pipeline also writes them deeper inside nested run folders.
 - Working artifacts:
   - source text in Markdown
   - structured block manifest
@@ -50,6 +54,14 @@ The pipeline is:
 4. place preserved non-text assets
 5. export PDF and run visual QA
 
+Output layout expectations:
+
+- treat the selected output directory as the container for one file's work
+- create `wip/` and `completed/` before writing artifacts
+- keep extracted manifests, translation request files, renders, and other intermediate outputs under `wip/`
+- copy final user-facing deliverables into `completed/` as soon as each file is completed, using clear filenames so they are easy to find without navigating nested subdirectories
+- when more than one final artifact matters for the user, copy all of them into `completed/`
+
 ## Dependency Bootstrap
 
 Before doing anything:
@@ -65,6 +77,7 @@ Execution rules:
 
 - run every babel-copy Python entrypoint with `uv run --script`
 - do not call babel-copy scripts with `python`, `python3`, or `sys.executable`
+- place intermediate artifacts under `wip/` and copy completed final deliverables into `completed/` as soon as each file is completed
 - when adding a new babel-copy script or repairing one that lacks inline metadata, run:
   - `uv init --script <script.py>`
   - add all direct dependencies to the script metadata
