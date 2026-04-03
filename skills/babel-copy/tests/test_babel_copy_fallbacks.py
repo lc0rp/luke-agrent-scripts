@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import importlib.util
 import json
 import os
@@ -552,6 +553,197 @@ class ExtractDocumentTests(unittest.TestCase):
                     fragment_merge_review_enabled=True,
                     write_page_renders=False,
                 )
+            )
+
+    def test_main_writes_page_render_for_prose_only_page_when_enabled(self) -> None:
+        class DummyStage:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def set(self, **kwargs) -> None:
+                return None
+
+        class DummyProfiler:
+            def stage(self, *args, **kwargs):
+                return DummyStage()
+
+            def set_counter(self, *args, **kwargs) -> None:
+                return None
+
+            def increment_counter(self, *args, **kwargs) -> None:
+                return None
+
+            def finish(self, *args, **kwargs) -> None:
+                return None
+
+        class DummyDoc:
+            def __init__(self, pages):
+                self._pages = pages
+                self.page_count = len(pages)
+
+            def __getitem__(self, index):
+                return self._pages[index]
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            input_pdf = workspace / "input.pdf"
+            input_pdf.write_bytes(b"%PDF-1.4\n")
+            output_dir = workspace / "output"
+            image = mock.Mock()
+            image.save.side_effect = (
+                lambda path, format="PNG": Path(path).write_bytes(b"png-bytes")
+            )
+            page = types.SimpleNamespace(rect=EXTRACT_DOCUMENT.fitz.Rect(0, 0, 612, 792))
+            region = types.SimpleNamespace(
+                text="Body copy",
+                font_size_hint=12.0,
+                source="native",
+            )
+            merged_block = {
+                "rect": EXTRACT_DOCUMENT.fitz.Rect(10, 20, 110, 40),
+                "source": "native",
+                "align": "left",
+                "regions": [region],
+            }
+            args = types.SimpleNamespace(
+                input_pdf=str(input_pdf),
+                output_dir=str(output_dir),
+                pages=None,
+                magnify_factor=2.0,
+                dpi=144,
+                font_baseline=None,
+                translation_provider=None,
+                fragment_merge_requests_json=None,
+                fragment_merge_responses_json=None,
+                profiler=False,
+                profiler_commands=None,
+                profiler_output_dir=None,
+                write_page_renders=True,
+            )
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(EXTRACT_DOCUMENT, "parse_args", return_value=args))
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "create_profiler", return_value=DummyProfiler())
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "resolve_profile_path", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT.fitz, "open", return_value=DummyDoc([page]))
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "sha256_file", return_value="doc-hash")
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "page_source_fingerprint", return_value="fp-1")
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "classify_page", return_value=("native", "native"))
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "extract_native_regions", return_value=[region])
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "merge_regions", return_value=[merged_block])
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "block_text_from_regions", return_value="Body copy")
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "export_page_assets", return_value=[])
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "should_skip_ruled_table_detection", return_value=True)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "attach_leading_bullets",
+                        side_effect=lambda blocks: blocks,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "merge_inline_row_fragments",
+                        side_effect=lambda blocks: blocks,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "merge_paragraph_fragments",
+                        side_effect=lambda blocks, pairs: blocks,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "dedupe_ocr_blocks",
+                        side_effect=lambda blocks: blocks,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "mark_textual_table_like_rows", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "build_textual_tables", return_value=[])
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "mark_margin_artifacts", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "mark_list_items_from_marker_artifacts",
+                        return_value=None,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "mark_two_column_rows", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "finalize_block_layout", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "stamp_block_fingerprints", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "mark_repeated_headers_and_footers",
+                        return_value=None,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "font_baseline_from_payload", return_value={})
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "update_run_manifest", return_value=None)
+                )
+                stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "line_payload", return_value={})
+                )
+                page_image_fast = stack.enter_context(
+                    mock.patch.object(EXTRACT_DOCUMENT, "page_image_fast", return_value=image)
+                )
+                result = EXTRACT_DOCUMENT.main()
+
+            self.assertEqual(result, 0)
+            render_path = output_dir / "page-renders" / "page-001.png"
+            self.assertTrue(render_path.exists())
+            self.assertEqual(page_image_fast.call_count, 1)
+            payload = json.loads((output_dir / "blocks.json").read_text())
+            self.assertEqual(
+                Path(payload["pages"][0]["render_path"]).resolve(),
+                render_path.resolve(),
             )
 
     def test_llm_fragment_merge_returns_desktop_request_when_unresolved(self) -> None:
