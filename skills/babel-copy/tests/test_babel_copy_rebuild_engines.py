@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,16 +15,79 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 
-def load_module(module_name: str, path: Path):
+def load_module(
+    module_name: str,
+    path: Path,
+    *,
+    stub_modules: dict[str, types.ModuleType] | None = None,
+):
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    if stub_modules:
+        for name, stub in stub_modules.items():
+            sys.modules.setdefault(name, stub)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
 
-BUILD_FINAL_PDF = load_module("test_build_final_pdf", SCRIPT_DIR / "build_final_pdf.py")
+def make_build_final_pdf_stubs() -> dict[str, types.ModuleType]:
+    class DummySpan:
+        def set(self, **kwargs):
+            return None
+
+    class DummyProfiler:
+        def stage(self, *args, **kwargs):
+            class _Ctx:
+                def __enter__(self_inner):
+                    return DummySpan()
+
+                def __exit__(self_inner, exc_type, exc, tb):
+                    return False
+
+            return _Ctx()
+
+        def set_counter(self, *args, **kwargs):
+            return None
+
+        def increment_counter(self, *args, **kwargs):
+            return None
+
+        def finish(self, *args, **kwargs):
+            return None
+
+    fake_fitz = types.ModuleType("fitz")
+
+    class DummyRect:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    fake_fitz.Rect = DummyRect
+    fake_fitz.Document = object
+    fake_core = types.ModuleType("core")
+    fake_core.PDF_SERIF_FONT_NAME = "Times-Roman"
+    fake_core.TEXT_SERIF_FONT_NAME = "Times New Roman"
+    fake_core.font_baseline_from_payload = lambda payload: {}
+    fake_block_overrides = types.ModuleType("block_overrides")
+    fake_block_overrides.apply_custom_overrides_to_payload = lambda payload: payload
+    fake_profiling = types.ModuleType("profiling")
+    fake_profiling.create_profiler = lambda *args, **kwargs: DummyProfiler()
+    fake_profiling.resolve_profile_path = lambda *args, **kwargs: None
+    return {
+        "fitz": fake_fitz,
+        "core": fake_core,
+        "block_overrides": fake_block_overrides,
+        "profiling": fake_profiling,
+    }
+
+
+BUILD_FINAL_PDF = load_module(
+    "test_build_final_pdf",
+    SCRIPT_DIR / "build_final_pdf.py",
+    stub_modules=make_build_final_pdf_stubs(),
+)
 
 
 class StructuredRebuildTests(unittest.TestCase):
@@ -72,7 +136,7 @@ class StructuredRebuildTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(render_hybrid_document.call_args.args, (source_pdf.resolve(), {"pages": [], "blocks": []}, output_pdf.resolve()))
-        self.assertEqual(render_hybrid_document.call_args.kwargs, {})
+        self.assertIn("profiler", render_hybrid_document.call_args.kwargs)
 
 
 if __name__ == "__main__":

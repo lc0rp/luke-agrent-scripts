@@ -78,6 +78,10 @@ Execution rules:
 - run every babel-copy Python entrypoint with `uv run --script`
 - do not call babel-copy scripts with `python`, `python3`, or `sys.executable`
 - place intermediate artifacts under `wip/` and copy completed final deliverables into `completed/` as soon as each file is completed
+- for benchmark runs, profiling can be enabled either with `--profiler` or via `ENABLE_PROFILER` in `.env`; explicit CLI flags win over `.env`
+- `--profiler-commands` or `PROFILER_COMMANDS` may restrict profiling to specific instrumented commands; empty means `all`
+- `--profiler-output-dir` or `PROFILER_OUTPUT_DIR` selects the base directory; empty defaults to `profiles`
+- profiler output is written as `<profiler-dir>/run-{timestamp}/{command}.json`
 - when adding a new babel-copy script or repairing one that lacks inline metadata, run:
   - `uv init --script <script.py>`
   - add all direct dependencies to the script metadata
@@ -90,6 +94,21 @@ Execution rules:
   - `exclude-newer = "..."` using an RFC 3339 timestamp
 
 Current babel-copy scripts already ship inline uv metadata and adjacent lockfiles. Preserve both when editing dependencies.
+
+Profiling support is currently wired into the main benchmarking surfaces:
+
+- `scripts/extract_document.py`
+- `scripts/translate_blocks_desktop.py`
+- `scripts/build_final_pdf.py`
+
+Use those profile JSON artifacts to benchmark before changing OCR, batching, or rebuild behavior.
+
+Current instrumented command names:
+
+- `extract_document`
+- `translate_blocks_desktop-prepare`
+- `translate_blocks_desktop-apply-responses`
+- `build_final_pdf`
 
 ## Workflow
 

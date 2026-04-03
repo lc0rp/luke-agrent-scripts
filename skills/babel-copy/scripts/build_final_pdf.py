@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import difflib
 import json
 import os
@@ -24,6 +25,7 @@ import fitz
 
 from block_overrides import apply_custom_overrides_to_payload
 import core
+from profiling import create_profiler, resolve_profile_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("source_pdf")
     parser.add_argument("translated_blocks_json")
     parser.add_argument("--output-pdf", required=True)
+    parser.add_argument("--profiler", action="store_true")
+    parser.add_argument("--profiler-commands")
+    parser.add_argument("--profiler-output-dir")
     return parser.parse_args()
 
 
@@ -510,9 +515,11 @@ def render_page_via_typst(
     font_baseline: dict[str, str],
     font_usability_cache: dict[str, bool],
     temp_dir: Path,
+    profiler=None,
 ) -> Path:
     script_dir = Path(__file__).resolve().parent
-    page_payload = filtered_payload_for_page(payload, page_number, assets_by_id)
+    with profiler.stage("filter_page_payload", page_number=page_number) if profiler else nullcontext():
+        page_payload = filtered_payload_for_page(payload, page_number, assets_by_id)
     default_text_font = str(font_baseline.get("text_font_name") or core.TEXT_SERIF_FONT_NAME)
     for block in page_payload.get("blocks", []):
         style = block.setdefault("style", {})
@@ -522,35 +529,40 @@ def render_page_via_typst(
         tmp_dir = Path(tmp_dir_raw)
         typ_path = tmp_dir / f"page-{page_number:03d}.typ"
         page_json = tmp_dir / f"page-{page_number:03d}.json"
-        page_json.write_text(json.dumps(page_payload, indent=2, ensure_ascii=False))
-        subprocess.run(
-            uv_script_command(
-                Path(script_dir / "rebuild_typst.py"),
-                str(page_json),
-                "--output-typ",
-                str(typ_path),
-            ),
-            check=True,
-        )
+        with profiler.stage("write_page_payload_json", page_number=page_number) if profiler else nullcontext():
+            page_json.write_text(json.dumps(page_payload, indent=2, ensure_ascii=False))
+        with profiler.stage("rebuild_typst_subprocess", page_number=page_number) if profiler else nullcontext():
+            subprocess.run(
+                uv_script_command(
+                    Path(script_dir / "rebuild_typst.py"),
+                    str(page_json),
+                    "--output-typ",
+                    str(typ_path),
+                ),
+                check=True,
+            )
         rendered_pdf = tmp_dir / f"{typ_path.stem}.pdf"
-        subprocess.run(
-            uv_script_command(
-                Path(script_dir / "export_typst_pdf.py"),
-                str(typ_path),
-                "--output-pdf",
-                str(rendered_pdf),
-            ),
-            check=True,
-        )
-        output_pdf.parent.mkdir(parents=True, exist_ok=True)
-        output_pdf.write_bytes(rendered_pdf.read_bytes())
+        with profiler.stage("export_typst_pdf_subprocess", page_number=page_number) if profiler else nullcontext():
+            subprocess.run(
+                uv_script_command(
+                    Path(script_dir / "export_typst_pdf.py"),
+                    str(typ_path),
+                    "--output-pdf",
+                    str(rendered_pdf),
+                ),
+                check=True,
+            )
+        with profiler.stage("copy_rendered_page_pdf", page_number=page_number) if profiler else nullcontext():
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
+            output_pdf.write_bytes(rendered_pdf.read_bytes())
     return output_pdf
 
 
-def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path) -> Path:
+def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, profiler=None) -> Path:
     blocks = blocks_by_page(payload)
     assets_by_id = asset_map(payload)
-    source_doc = fitz.open(source_pdf)
+    with profiler.stage("open_source_pdf", path=source_pdf) if profiler else nullcontext():
+        source_doc = fitz.open(source_pdf)
     out_doc = fitz.open()
     temp_paths: list[Path] = []
     font_catalog = build_source_font_catalog(source_doc)
@@ -564,30 +576,44 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path) ->
                 page_number = int(page["page_number"])
                 mode = choose_page_mode(page, assets_by_id)
                 page_blocks = blocks.get(page_number, [])
-                if mode == "template_overlay":
-                    rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks, font_catalog, font_cache, font_dir, font_baseline)
-                    out_doc.insert_pdf(rendered_doc)
-                    rendered_doc.close()
-                    continue
-                with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
-                    temp_path = Path(tmp_file.name)
-                temp_paths.append(temp_path)
-                render_page_via_typst(
-                    payload,
-                    page_number,
-                    temp_path,
-                    assets_by_id,
-                    source_doc,
-                    font_catalog,
-                    font_baseline,
-                    font_usability_cache,
-                    font_dir,
-                )
-                rendered_doc = fitz.open(temp_path)
-                out_doc.insert_pdf(rendered_doc)
-                rendered_doc.close()
-        output_pdf.parent.mkdir(parents=True, exist_ok=True)
-        out_doc.save(output_pdf, garbage=4, deflate=True)
+                with profiler.stage(
+                    "render_page",
+                    page_number=page_number,
+                    mode=mode,
+                    block_count=len(page_blocks),
+                    table_count=len(page.get("tables", [])),
+                ) if profiler else nullcontext() as page_span:
+                    if mode == "template_overlay":
+                        rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks, font_catalog, font_cache, font_dir, font_baseline)
+                        out_doc.insert_pdf(rendered_doc)
+                        rendered_doc.close()
+                        if profiler:
+                            profiler.increment_counter("overlay_pages")
+                        continue
+                    with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
+                        temp_path = Path(tmp_file.name)
+                    temp_paths.append(temp_path)
+                    render_page_via_typst(
+                        payload,
+                        page_number,
+                        temp_path,
+                        assets_by_id,
+                        source_doc,
+                        font_catalog,
+                        font_baseline,
+                        font_usability_cache,
+                        font_dir,
+                        profiler=profiler,
+                    )
+                    with profiler.stage("load_rendered_page_pdf", page_number=page_number) if profiler else nullcontext():
+                        rendered_doc = fitz.open(temp_path)
+                        out_doc.insert_pdf(rendered_doc)
+                        rendered_doc.close()
+                    if profiler:
+                        profiler.increment_counter("rebuild_pages")
+        with profiler.stage("save_output_pdf", path=output_pdf) if profiler else nullcontext():
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
+            out_doc.save(output_pdf, garbage=4, deflate=True)
         return output_pdf
     finally:
         source_doc.close()
@@ -601,10 +627,38 @@ def main() -> int:
     source_pdf = Path(args.source_pdf).expanduser().resolve()
     translated_blocks_json = Path(args.translated_blocks_json).expanduser().resolve()
     output_pdf = Path(args.output_pdf).expanduser().resolve()
-    payload = apply_custom_overrides_to_payload(json.loads(translated_blocks_json.read_text()))
-    rendered = render_hybrid_document(source_pdf, payload, output_pdf)
-    print(rendered)
-    return 0
+    profiler = create_profiler(
+        resolve_profile_path(
+            cli_enabled=bool(args.profiler),
+            cli_commands=args.profiler_commands,
+            cli_output_dir=args.profiler_output_dir,
+            command="build_final_pdf",
+            search_from=Path.cwd(),
+        ),
+        command="build_final_pdf",
+        metadata={
+            "source_pdf": str(source_pdf),
+            "translated_blocks_json": str(translated_blocks_json),
+            "output_pdf": str(output_pdf),
+        },
+    )
+    try:
+        with profiler.stage("read_translated_blocks_json", path=translated_blocks_json):
+            payload = apply_custom_overrides_to_payload(
+                json.loads(translated_blocks_json.read_text())
+            )
+        profiler.set_counter("page_count", len(payload.get("pages", [])))
+        profiler.set_counter("block_count", len(payload.get("blocks", [])))
+        rendered = render_hybrid_document(source_pdf, payload, output_pdf, profiler=profiler)
+        print(rendered)
+        profiler.finish(status="ok")
+        return 0
+    except BaseException as exc:
+        profiler.finish(
+            status="error",
+            error={"type": type(exc).__name__, "message": str(exc)},
+        )
+        raise
 
 
 if __name__ == "__main__":

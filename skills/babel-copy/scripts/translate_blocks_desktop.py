@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
+from profiling import create_profiler, resolve_profile_path
 from translation_runtime import (
     TRANSLATION_PROVIDER_CHOICES,
     detect_runtime_mode,
@@ -49,6 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prepare_parser.add_argument("--model")
     prepare_parser.add_argument("--batch-size", type=int, default=18)
     prepare_parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
+    add_profiler_arguments(prepare_parser)
 
     apply_parser = subparsers.add_parser(
         "apply-responses",
@@ -59,6 +62,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     apply_parser.add_argument("--responses-json", required=True)
     apply_parser.add_argument("--output-json", required=True)
     apply_parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
+    add_profiler_arguments(apply_parser)
     return parser.parse_args(raw_argv)
 
 
@@ -70,6 +74,13 @@ def add_translation_io_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model")
     parser.add_argument("--batch-size", type=int, default=18)
     parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
+    add_profiler_arguments(parser)
+
+
+def add_profiler_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profiler", action="store_true")
+    parser.add_argument("--profiler-commands")
+    parser.add_argument("--profiler-output-dir")
 
 
 def translatable_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -166,38 +177,42 @@ def prepare_request_payload(
     batch_size: int,
     provider: str,
     model: str | None,
+    profiler=None,
 ) -> Path:
-    payload = json.loads(blocks_json.read_text())
-    blocks = translatable_blocks(payload)
-    batches = chunked(blocks, max(1, batch_size))
-    runtime_mode = detect_runtime_mode(provider)
+    with profiler.stage("read_blocks_json", path=blocks_json) if profiler else nullcontext():
+        payload = json.loads(blocks_json.read_text())
+    with profiler.stage("collect_translatable_blocks") if profiler else nullcontext():
+        blocks = translatable_blocks(payload)
+        batches = chunked(blocks, max(1, batch_size))
+        runtime_mode = detect_runtime_mode(provider)
 
     requests = []
     total_batches = len(batches)
-    for index, batch in enumerate(batches, start=1):
-        request_id = f"batch-{index:03d}"
-        requests.append(
-            {
-                "request_id": request_id,
-                "kind": "translation_batch",
-                "batch_index": index,
-                "total_batches": total_batches,
-                "runtime_mode": runtime_mode,
-                "provider": provider,
-                "model": model,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "block_ids": [str(block["id"]) for block in batch],
-                "prompt": build_prompt(batch, source_lang, target_lang),
-                "response_shape": {
-                    "translations": {"block_id": "translated text"},
-                },
-                "dispatch_hint": (
-                    "Send this prompt to a desktop subagent in the active Codex or Claude app. "
-                    "Require a JSON-only reply that matches response_shape."
-                ),
-            }
-        )
+    with profiler.stage("build_requests", batch_count=total_batches) if profiler else nullcontext():
+        for index, batch in enumerate(batches, start=1):
+            request_id = f"batch-{index:03d}"
+            requests.append(
+                {
+                    "request_id": request_id,
+                    "kind": "translation_batch",
+                    "batch_index": index,
+                    "total_batches": total_batches,
+                    "runtime_mode": runtime_mode,
+                    "provider": provider,
+                    "model": model,
+                    "source_lang": source_lang,
+                    "target_lang": target_lang,
+                    "block_ids": [str(block["id"]) for block in batch],
+                    "prompt": build_prompt(batch, source_lang, target_lang),
+                    "response_shape": {
+                        "translations": {"block_id": "translated text"},
+                    },
+                    "dispatch_hint": (
+                        "Send this prompt to a desktop subagent in the active Codex or Claude app. "
+                        "Require a JSON-only reply that matches response_shape."
+                    ),
+                }
+            )
 
     request_payload = {
         "schema_version": "1.0",
@@ -212,8 +227,16 @@ def prepare_request_payload(
         "request_count": len(requests),
         "requests": requests,
     }
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(request_payload, indent=2, ensure_ascii=False))
+    if profiler:
+        profiler.set_counter("block_count", len(blocks))
+        profiler.set_counter("request_count", len(requests))
+        profiler.set_counter(
+            "prompt_char_count",
+            sum(len(str(request.get("prompt", ""))) for request in requests),
+        )
+    with profiler.stage("write_requests_json", path=output_json) if profiler else nullcontext():
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(request_payload, indent=2, ensure_ascii=False))
     return output_json
 
 
@@ -283,28 +306,31 @@ def apply_response_payload(
     responses_json: Path,
     output_json: Path,
     provider_override: str | None,
+    profiler=None,
 ) -> Path:
-    payload = json.loads(blocks_json.read_text())
-    request_payload = json.loads(requests_json.read_text())
-    response_payload = json.loads(responses_json.read_text())
-    entries = parse_response_entries(response_payload)
-    requests = request_payload.get("requests", [])
-    if not isinstance(requests, list):
-        raise SystemExit(f"Unsupported request payload format in {requests_json}")
+    with profiler.stage("read_inputs") if profiler else nullcontext():
+        payload = json.loads(blocks_json.read_text())
+        request_payload = json.loads(requests_json.read_text())
+        response_payload = json.loads(responses_json.read_text())
+        entries = parse_response_entries(response_payload)
+        requests = request_payload.get("requests", [])
+        if not isinstance(requests, list):
+            raise SystemExit(f"Unsupported request payload format in {requests_json}")
 
     request_ids = {
         str(entry.get("request_id")) for entry in requests if isinstance(entry, dict)
     }
     translations: dict[str, str] = {}
     seen_request_ids: set[str] = set()
-    for entry in entries:
-        request_id = str(entry.get("request_id", "")).strip()
-        if not request_id:
-            raise SystemExit("Each response entry must include request_id")
-        seen_request_ids.add(request_id)
-        if request_ids and request_id not in request_ids:
-            raise SystemExit(f"Unexpected request_id in responses: {request_id}")
-        translations.update(parse_translation_response_entry(entry))
+    with profiler.stage("parse_responses", response_count=len(entries)) if profiler else nullcontext():
+        for entry in entries:
+            request_id = str(entry.get("request_id", "")).strip()
+            if not request_id:
+                raise SystemExit("Each response entry must include request_id")
+            seen_request_ids.add(request_id)
+            if request_ids and request_id not in request_ids:
+                raise SystemExit(f"Unexpected request_id in responses: {request_id}")
+            translations.update(parse_translation_response_entry(entry))
 
     missing_request_ids = sorted(request_ids - seen_request_ids)
     if missing_request_ids:
@@ -321,14 +347,20 @@ def apply_response_payload(
         ).strip()
         or "codex"
     )
-    final_payload = apply_translations_to_payload(
-        payload,
-        translations=translations,
-        provider=provider,
-        runtime_mode=runtime_mode,
-    )
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(final_payload, indent=2, ensure_ascii=False))
+    with profiler.stage("apply_translations") if profiler else nullcontext():
+        final_payload = apply_translations_to_payload(
+            payload,
+            translations=translations,
+            provider=provider,
+            runtime_mode=runtime_mode,
+        )
+    if profiler:
+        profiler.set_counter("request_count", len(request_ids))
+        profiler.set_counter("response_count", len(entries))
+        profiler.set_counter("translated_block_count", len(translations))
+    with profiler.stage("write_translated_blocks", path=output_json) if profiler else nullcontext():
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(final_payload, indent=2, ensure_ascii=False))
     return output_json
 
 
@@ -345,34 +377,58 @@ def run_direct_translation(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    if args.command == "run":
-        return run_direct_translation(args)
-    if args.command == "prepare":
-        blocks_json = Path(args.blocks_json).expanduser().resolve()
-        output_json = Path(args.output_json).expanduser().resolve()
-        provider = translation_provider(args.provider)
-        result = prepare_request_payload(
-            blocks_json=blocks_json,
-            output_json=output_json,
-            source_lang=args.source_lang,
-            target_lang=args.target_lang,
-            batch_size=args.batch_size,
-            provider=provider,
-            model=args.model,
+    profiler = create_profiler(
+        resolve_profile_path(
+            cli_enabled=bool(getattr(args, "profiler", False)),
+            cli_commands=getattr(args, "profiler_commands", None),
+            cli_output_dir=getattr(args, "profiler_output_dir", None),
+            command=f"translate_blocks_desktop:{args.command}",
+            search_from=Path.cwd(),
+        ),
+        command=f"translate_blocks_desktop:{args.command}",
+        metadata={"command": args.command},
+    )
+    try:
+        if args.command == "run":
+            result = run_direct_translation(args)
+            profiler.finish(status="ok")
+            return result
+        if args.command == "prepare":
+            blocks_json = Path(args.blocks_json).expanduser().resolve()
+            output_json = Path(args.output_json).expanduser().resolve()
+            provider = translation_provider(args.provider)
+            result = prepare_request_payload(
+                blocks_json=blocks_json,
+                output_json=output_json,
+                source_lang=args.source_lang,
+                target_lang=args.target_lang,
+                batch_size=args.batch_size,
+                provider=provider,
+                model=args.model,
+                profiler=profiler,
+            )
+            print(result)
+            profiler.finish(status="ok")
+            return 0
+        if args.command == "apply-responses":
+            result = apply_response_payload(
+                blocks_json=Path(args.blocks_json).expanduser().resolve(),
+                requests_json=Path(args.requests_json).expanduser().resolve(),
+                responses_json=Path(args.responses_json).expanduser().resolve(),
+                output_json=Path(args.output_json).expanduser().resolve(),
+                provider_override=args.provider,
+                profiler=profiler,
+            )
+            print(result)
+            profiler.finish(status="ok")
+            return 0
+        raise SystemExit(f"Unsupported command: {args.command}")
+    except BaseException as exc:
+        profiler.finish(
+            status="error",
+            error={"type": type(exc).__name__, "message": str(exc)},
         )
-        print(result)
-        return 0
-    if args.command == "apply-responses":
-        result = apply_response_payload(
-            blocks_json=Path(args.blocks_json).expanduser().resolve(),
-            requests_json=Path(args.requests_json).expanduser().resolve(),
-            responses_json=Path(args.responses_json).expanduser().resolve(),
-            output_json=Path(args.output_json).expanduser().resolve(),
-            provider_override=args.provider,
-        )
-        print(result)
-        return 0
-    raise SystemExit(f"Unsupported command: {args.command}")
+        raise
 
 
 if __name__ == "__main__":
