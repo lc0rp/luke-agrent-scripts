@@ -222,6 +222,90 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(payload["translation_backend_used"], "claude_desktop_subagent")
 
 
+class ExtractDocumentTableHeuristicsTests(unittest.TestCase):
+    def test_skip_ruled_table_detection_for_strong_single_column_prose(self) -> None:
+        page_rect = types.SimpleNamespace(width=612.0, height=792.0)
+        page_blocks = [
+            {
+                "bbox": [72.0, 90.0, 510.0, 130.0],
+                "text": "This paragraph is intentionally long enough to look like normal body copy on a prose-heavy legal page.",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [72.0, 138.0, 512.0, 178.0],
+                "text": "Another wide paragraph continues the same single-column rhythm without any signs of cell boundaries or tabular alignment.",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [73.0, 186.0, 508.0, 226.0],
+                "text": "A third paragraph keeps the left edge stable and leaves no compact multi-column label pattern for the table detector to chase.",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [74.0, 234.0, 506.0, 274.0],
+                "text": "The last paragraph preserves the same geometry so the page strongly resembles straight prose instead of a form or bordered table.",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+        ]
+
+        result = EXTRACT_DOCUMENT.should_skip_ruled_table_detection(
+            page_blocks, page_rect
+        )
+
+        self.assertTrue(result)
+
+    def test_keep_ruled_table_detection_for_obvious_columnar_layout(self) -> None:
+        page_rect = types.SimpleNamespace(width=612.0, height=792.0)
+        page_blocks = [
+            {
+                "bbox": [72.0, 120.0, 160.0, 142.0],
+                "text": "Item",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [220.0, 120.0, 308.0, 142.0],
+                "text": "Amount",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [404.0, 120.0, 492.0, 142.0],
+                "text": "Status",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [72.0, 162.0, 160.0, 184.0],
+                "text": "Fee",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [220.0, 162.0, 308.0, 184.0],
+                "text": "100.00",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+            {
+                "bbox": [404.0, 162.0, 492.0, 184.0],
+                "text": "Due",
+                "role": "paragraph",
+                "keep_original": False,
+            },
+        ]
+
+        result = EXTRACT_DOCUMENT.should_skip_ruled_table_detection(
+            page_blocks, page_rect
+        )
+
+        self.assertFalse(result)
+
+
 class ExtractDocumentTests(unittest.TestCase):
     def test_llm_fragment_merge_returns_desktop_request_when_unresolved(self) -> None:
         candidates = [

@@ -878,6 +878,96 @@ def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
     ]
 
 
+def cluster_nearby_values(
+    values: list[float], *, tolerance: float
+) -> list[list[float]]:
+    if not values:
+        return []
+    sorted_values = sorted(float(value) for value in values)
+    clusters: list[list[float]] = [[sorted_values[0]]]
+    for value in sorted_values[1:]:
+        if value - clusters[-1][-1] <= tolerance:
+            clusters[-1].append(value)
+            continue
+        clusters.append([value])
+    return clusters
+
+
+def page_has_table_geometry_cues(page_blocks: list[dict], page_rect: fitz.Rect) -> bool:
+    compact_blocks: list[dict] = []
+    for block in page_blocks:
+        text = clean_text(str(block.get("text", "")))
+        if not text or block.get("keep_original") or block.get("role") == "artifact":
+            continue
+        if block.get("table") or block.get("role") == "table_cell" or "|" in text:
+            return True
+        bbox = block.get("bbox") or [0, 0, 0, 0]
+        block_width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        if block_width <= page_rect.width * 0.42 and len(text) <= 48:
+            compact_blocks.append(block)
+    if len(compact_blocks) < 4:
+        return False
+
+    left_clusters = cluster_nearby_values(
+        [float(block["bbox"][0]) for block in compact_blocks],
+        tolerance=max(12.0, page_rect.width * 0.03),
+    )
+    row_clusters = cluster_nearby_values(
+        [float(block["bbox"][1]) for block in compact_blocks],
+        tolerance=max(12.0, page_rect.height * 0.025),
+    )
+    repeated_left_clusters = sum(1 for cluster in left_clusters if len(cluster) >= 2)
+    repeated_row_clusters = sum(1 for cluster in row_clusters if len(cluster) >= 2)
+    return repeated_left_clusters >= 3 and repeated_row_clusters >= 2
+
+
+def page_is_strong_single_column_prose(
+    page_blocks: list[dict], page_rect: fitz.Rect
+) -> bool:
+    text_blocks: list[dict] = []
+    wide_paragraphs: list[dict] = []
+    narrow_blocks = 0
+    for block in page_blocks:
+        text = clean_text(str(block.get("text", "")))
+        if not text or block.get("keep_original") or block.get("role") == "artifact":
+            continue
+        bbox = block.get("bbox") or [0, 0, 0, 0]
+        block_width = max(0.0, float(bbox[2]) - float(bbox[0]))
+        text_blocks.append(block)
+        if (
+            str(block.get("role", "")) in {"paragraph", "list_item"}
+            and block_width >= page_rect.width * 0.52
+            and len(text) >= 40
+        ):
+            wide_paragraphs.append(block)
+        elif block_width <= page_rect.width * 0.42 and len(text) <= 36:
+            narrow_blocks += 1
+
+    if len(text_blocks) < 4 or len(wide_paragraphs) < 3:
+        return False
+
+    left_clusters = cluster_nearby_values(
+        [float(block["bbox"][0]) for block in wide_paragraphs],
+        tolerance=max(10.0, page_rect.width * 0.025),
+    )
+    dominant_left_cluster = max((len(cluster) for cluster in left_clusters), default=0)
+    required_cluster_size = max(3, (len(wide_paragraphs) * 7 + 9) // 10)
+    allowed_narrow_blocks = max(2, len(text_blocks) // 5)
+    return (
+        dominant_left_cluster >= required_cluster_size
+        and len(wide_paragraphs) >= max(3, (len(text_blocks) * 3) // 5)
+        and narrow_blocks <= allowed_narrow_blocks
+    )
+
+
+def should_skip_ruled_table_detection(
+    page_blocks: list[dict], page_rect: fitz.Rect
+) -> bool:
+    if page_has_table_geometry_cues(page_blocks, page_rect):
+        return False
+    return page_is_strong_single_column_prose(page_blocks, page_rect)
+
+
 def build_table_cells(page_number: int, table: dict) -> list[dict]:
     cells = []
     columns = table["columns"]
@@ -2224,26 +2314,35 @@ def main() -> int:
                         markdown_lines.append(block_text)
                         markdown_lines.append("")
 
-                with profiler.stage("detect_and_fill_tables", page_number=page_number):
-                    page_tables = detect_tables(render_path, page.rect)
-                    for table in page_tables:
-                        table["id"] = f"p{page_number}-{table['id']}"
-                        table["page_number"] = page_number
-                        table["cells"] = build_table_cells(page_number, table)
-                    assign_blocks_to_tables(page_blocks, page_tables)
-                    fill_empty_cells_with_ocr(
-                        render_path,
-                        page_number,
-                        page.rect,
-                        page_tables,
-                        page_blocks,
+                with profiler.stage("detect_and_fill_tables", page_number=page_number) as table_span:
+                    skipped_ruled_table_detection = should_skip_ruled_table_detection(
+                        page_blocks, page.rect
                     )
-                    enrich_tall_cells_with_ocr(
-                        render_path,
-                        page.rect,
-                        page_tables,
-                        page_blocks,
+                    table_span.set(
+                        skipped_ruled_table_detection=skipped_ruled_table_detection
                     )
+                    if skipped_ruled_table_detection:
+                        page_tables = []
+                    else:
+                        page_tables = detect_tables(render_path, page.rect)
+                        for table in page_tables:
+                            table["id"] = f"p{page_number}-{table['id']}"
+                            table["page_number"] = page_number
+                            table["cells"] = build_table_cells(page_number, table)
+                        assign_blocks_to_tables(page_blocks, page_tables)
+                        fill_empty_cells_with_ocr(
+                            render_path,
+                            page_number,
+                            page.rect,
+                            page_tables,
+                            page_blocks,
+                        )
+                        enrich_tall_cells_with_ocr(
+                            render_path,
+                            page.rect,
+                            page_tables,
+                            page_blocks,
+                        )
 
                 with profiler.stage("merge_fragments", page_number=page_number):
                     page_blocks = attach_leading_bullets(page_blocks)
