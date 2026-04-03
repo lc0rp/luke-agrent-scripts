@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
 _FRAGMENT_MERGE_LLM_CACHE: dict[str, bool] = {}
+_PDF_XREF_PATTERN = re.compile(r"(\d+)\s+0\s+R")
 
 
 def region_style_signature(region) -> tuple[str, tuple[float, float, float]]:
@@ -128,15 +129,160 @@ class PageRenderCache:
         return self.render_path
 
 
-def page_source_fingerprint(page: fitz.Page) -> str:
+class PreviousExtractIndex:
+    def __init__(
+        self,
+        *,
+        pages_by_number: dict[int, dict],
+        blocks_by_page: dict[int, list[dict]],
+        assets_by_page: dict[int, list[dict]],
+    ) -> None:
+        self.pages_by_number = pages_by_number
+        self.blocks_by_page = blocks_by_page
+        self.assets_by_page = assets_by_page
+
+
+def build_previous_extract_index(previous_payload: dict) -> PreviousExtractIndex:
+    pages_by_number: dict[int, dict] = {}
+    blocks_by_page: defaultdict[int, list[dict]] = defaultdict(list)
+    assets_by_page: defaultdict[int, list[dict]] = defaultdict(list)
+    for page in previous_payload.get("pages", []):
+        page_number = int(page.get("page_number", 0) or 0)
+        if page_number > 0:
+            pages_by_number[page_number] = page
+    for block in previous_payload.get("blocks", []):
+        page_number = int(block.get("page_number", 0) or 0)
+        if page_number > 0:
+            blocks_by_page[page_number].append(block)
+    for asset in previous_payload.get("assets", []):
+        page_number = int(asset.get("page_number", 0) or 0)
+        if page_number > 0:
+            assets_by_page[page_number].append(asset)
+    return PreviousExtractIndex(
+        pages_by_number=pages_by_number,
+        blocks_by_page=dict(blocks_by_page),
+        assets_by_page=dict(assets_by_page),
+    )
+
+
+def previous_assets_for_page(
+    previous_index: PreviousExtractIndex, page_number: int
+) -> list[dict]:
+    return [
+        deepcopy(asset)
+        for asset in previous_index.assets_by_page.get(page_number, [])
+    ]
+
+
+def previous_blocks_for_page(
+    previous_index: PreviousExtractIndex, page_number: int
+) -> list[dict]:
+    return [
+        deepcopy(block)
+        for block in previous_index.blocks_by_page.get(page_number, [])
+    ]
+
+
+def _xref_numbers_from_pdf_value(kind: str, value: str) -> list[int]:
+    if kind not in {"array", "dict", "xref"}:
+        return []
+    return [int(match) for match in _PDF_XREF_PATTERN.findall(str(value))]
+
+
+def _pdf_object_digest(doc: fitz.Document, xref: int) -> dict:
+    object_repr = None
+    stream_sha256 = None
+    try:
+        object_repr = doc.xref_object(xref, compressed=False)
+    except Exception:
+        object_repr = None
+    try:
+        stream = doc.xref_stream(xref)
+    except Exception:
+        stream = b""
+    if stream:
+        stream_sha256 = hashlib.sha256(stream).hexdigest()
+    return {
+        "xref": xref,
+        "object": object_repr,
+        "stream_sha256": stream_sha256,
+    }
+
+
+def page_source_pdf_native_fingerprint(page: fitz.Page) -> str | None:
+    doc = getattr(page, "parent", None)
+    page_xref = int(getattr(page, "xref", 0) or 0)
+    if doc is None or page_xref <= 0:
+        return None
+    try:
+        page_object = doc.xref_object(page_xref, compressed=False)
+    except Exception:
+        return None
+    contents = [int(xref) for xref in page.get_contents() or [] if int(xref) > 0]
+    related_xrefs: set[int] = set(contents)
+    for key in ("Resources", "Annots"):
+        try:
+            kind, value = doc.xref_get_key(page_xref, key)
+        except Exception:
+            continue
+        related_xrefs.update(_xref_numbers_from_pdf_value(kind, value))
+    try:
+        related_xrefs.update(
+            int(image[0])
+            for image in page.get_images(full=True)
+            if image and int(image[0]) > 0
+        )
+    except Exception:
+        pass
+    payload = {
+        "page_object": page_object,
+        "related_objects": [
+            _pdf_object_digest(doc, xref) for xref in sorted(related_xrefs)
+        ],
+    }
+    return f"pdfnative:{stable_json_hash(payload)}"
+
+
+def page_source_raster_fingerprint(page: fitz.Page) -> str:
     pixmap = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), alpha=False)
-    return stable_json_hash(
-        {
-            "width": pixmap.width,
-            "height": pixmap.height,
-            "stride": pixmap.stride,
-            "samples_sha256": hashlib.sha256(bytes(pixmap.samples)).hexdigest(),
-        }
+    payload = {
+        "width": pixmap.width,
+        "height": pixmap.height,
+        "stride": pixmap.stride,
+        "samples_sha256": hashlib.sha256(bytes(pixmap.samples)).hexdigest(),
+    }
+    return f"raster:{stable_json_hash(payload)}"
+
+
+def _normalized_raster_fingerprint(fingerprint: str) -> str | None:
+    value = str(fingerprint or "").strip()
+    if not value:
+        return None
+    if value.startswith("pdfnative:"):
+        return None
+    if value.startswith("raster:"):
+        return value.removeprefix("raster:")
+    return value
+
+
+def resolve_page_source_fingerprint(
+    page: fitz.Page, previous_fingerprint: str = ""
+) -> tuple[str, bool]:
+    native_fingerprint = page_source_pdf_native_fingerprint(page)
+    if native_fingerprint is not None:
+        if previous_fingerprint == native_fingerprint:
+            return native_fingerprint, True
+        previous_raster = _normalized_raster_fingerprint(previous_fingerprint)
+        if previous_raster is not None:
+            raster_fingerprint = page_source_raster_fingerprint(page)
+            if _normalized_raster_fingerprint(raster_fingerprint) == previous_raster:
+                return native_fingerprint, True
+        return native_fingerprint, False
+    raster_fingerprint = page_source_raster_fingerprint(page)
+    return (
+        raster_fingerprint,
+        _normalized_raster_fingerprint(raster_fingerprint)
+        == _normalized_raster_fingerprint(previous_fingerprint),
     )
 
 
@@ -184,26 +330,10 @@ def extend_markdown_for_page(
         markdown_lines.append("")
 
 
-def previous_assets_for_page(previous_payload: dict, page_number: int) -> list[dict]:
-    return [
-        deepcopy(asset)
-        for asset in previous_payload.get("assets", [])
-        if int(asset.get("page_number", 0) or 0) == page_number
-    ]
-
-
-def previous_blocks_for_page(previous_payload: dict, page_number: int) -> list[dict]:
-    return [
-        deepcopy(block)
-        for block in previous_payload.get("blocks", [])
-        if int(block.get("page_number", 0) or 0) == page_number
-    ]
-
-
 def can_reuse_extracted_page(
     *,
     previous_page: dict | None,
-    page_fingerprint: str,
+    page_fingerprint_matches_previous: bool,
     previous_page_assets: list[dict],
     fragment_merge_review_enabled: bool,
     write_page_renders: bool,
@@ -212,7 +342,7 @@ def can_reuse_extracted_page(
         return False
     if fragment_merge_review_enabled:
         return False
-    if str(previous_page.get("source_fingerprint", "")) != page_fingerprint:
+    if not page_fingerprint_matches_previous:
         return False
     if not asset_paths_exist(previous_page_assets):
         return False
@@ -2485,6 +2615,7 @@ def main() -> int:
                 if blocks_json_path.exists()
                 else {}
             )
+            previous_index = build_previous_extract_index(previous_payload)
         all_blocks = []
         all_assets = []
         pages_payload = []
@@ -2504,24 +2635,29 @@ def main() -> int:
                 )
                 render_cache = PageRenderCache(page, args.dpi, render_path=render_path)
                 with profiler.stage("fingerprint_page_source", page_number=page_number):
-                    source_fingerprint = page_source_fingerprint(page)
-                previous_page = next(
+                    previous_page = previous_index.pages_by_number.get(page_number)
+                    previous_page_fingerprint = (
+                        str(previous_page.get("source_fingerprint", ""))
+                        if previous_page
+                        else ""
+                    )
                     (
-                        candidate
-                        for candidate in previous_payload.get("pages", [])
-                        if int(candidate.get("page_number", 0) or 0) == page_number
-                    ),
-                    None,
+                        source_fingerprint,
+                        source_fingerprint_matches_previous,
+                    ) = resolve_page_source_fingerprint(
+                        page, previous_page_fingerprint
+                    )
+                previous_page_assets = previous_assets_for_page(
+                    previous_index, page_number
                 )
-                previous_page_assets = previous_assets_for_page(previous_payload, page_number)
                 if can_reuse_extracted_page(
                     previous_page=previous_page,
-                    page_fingerprint=source_fingerprint,
+                    page_fingerprint_matches_previous=source_fingerprint_matches_previous,
                     previous_page_assets=previous_page_assets,
                     fragment_merge_review_enabled=fragment_merge_review_enabled,
                     write_page_renders=bool(args.write_page_renders),
                 ):
-                    page_blocks = previous_blocks_for_page(previous_payload, page_number)
+                    page_blocks = previous_blocks_for_page(previous_index, page_number)
                     page_tables = deepcopy(previous_page.get("tables", [])) if previous_page else []
                     signature_assets = [
                         deepcopy(asset)

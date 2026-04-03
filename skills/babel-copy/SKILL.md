@@ -226,7 +226,7 @@ Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
 The extractor batches unresolved fragment pairs document-wide, so one request file may contain a small number of multi-page prompt batches instead of one prompt per page.
 
-Extraction writes `document_hash`, per-page `source_fingerprint`, and per-block fingerprints into `blocks.json` and `run-manifest.json`. On rerun, unchanged pages are reused from the prior extraction output when their cached assets still exist.
+Extraction writes `document_hash`, per-page `source_fingerprint`, and per-block fingerprints into `blocks.json` and `run-manifest.json`. Per-page extraction fingerprints should prefer cheap PDF-native object hashing and fall back to raster hashing only for compatibility or pages that do not expose enough native structure. On rerun, unchanged pages are reused from the prior extraction output when their cached assets still exist.
 
 Resume expectations:
 

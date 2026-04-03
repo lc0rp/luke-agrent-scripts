@@ -529,7 +529,7 @@ class ExtractDocumentTests(unittest.TestCase):
             self.assertTrue(
                 EXTRACT_DOCUMENT.can_reuse_extracted_page(
                     previous_page=previous_page,
-                    page_fingerprint="fp-1",
+                    page_fingerprint_matches_previous=True,
                     previous_page_assets=[{"path": str(asset_path)}],
                     fragment_merge_review_enabled=False,
                     write_page_renders=False,
@@ -538,7 +538,7 @@ class ExtractDocumentTests(unittest.TestCase):
             self.assertFalse(
                 EXTRACT_DOCUMENT.can_reuse_extracted_page(
                     previous_page=previous_page,
-                    page_fingerprint="fp-2",
+                    page_fingerprint_matches_previous=False,
                     previous_page_assets=[{"path": str(asset_path)}],
                     fragment_merge_review_enabled=False,
                     write_page_renders=False,
@@ -548,7 +548,7 @@ class ExtractDocumentTests(unittest.TestCase):
             self.assertFalse(
                 EXTRACT_DOCUMENT.can_reuse_extracted_page(
                     previous_page=previous_page,
-                    page_fingerprint="fp-1",
+                    page_fingerprint_matches_previous=True,
                     previous_page_assets=[{"path": str(asset_path)}],
                     fragment_merge_review_enabled=True,
                     write_page_renders=False,
@@ -642,7 +642,11 @@ class ExtractDocumentTests(unittest.TestCase):
                     mock.patch.object(EXTRACT_DOCUMENT, "sha256_file", return_value="doc-hash")
                 )
                 stack.enter_context(
-                    mock.patch.object(EXTRACT_DOCUMENT, "page_source_fingerprint", return_value="fp-1")
+                    mock.patch.object(
+                        EXTRACT_DOCUMENT,
+                        "resolve_page_source_fingerprint",
+                        return_value=("pdfnative:fp-1", False),
+                    )
                 )
                 stack.enter_context(
                     mock.patch.object(EXTRACT_DOCUMENT, "classify_page", return_value=("native", "native"))

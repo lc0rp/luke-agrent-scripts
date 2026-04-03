@@ -23,11 +23,21 @@ def load_module(
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
+    original_modules: dict[str, types.ModuleType | None] = {}
     if stub_modules:
         for name, stub in stub_modules.items():
+            original_modules[name] = sys.modules.get(name)
             sys.modules[name] = stub
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name in original_modules:
+            original = original_modules[name]
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
     return module
 
 
@@ -146,6 +156,67 @@ class ExtractDocumentRenderCacheTests(unittest.TestCase):
         self.assertEqual(second, render_path)
         page_image_fast.assert_called_once()
         image.save.assert_called_once_with(render_path, format="PNG")
+
+    def test_build_previous_extract_index_indexes_by_page_number(self) -> None:
+        payload = {
+            "pages": [{"page_number": 1, "source_fingerprint": "fp-1"}],
+            "blocks": [{"id": "p1-b1", "page_number": 1, "text": "Hello"}],
+            "assets": [{"id": "a1", "page_number": 1, "path": "/tmp/a1.png"}],
+        }
+
+        index = EXTRACT_DOCUMENT.build_previous_extract_index(payload)
+        page_assets = EXTRACT_DOCUMENT.previous_assets_for_page(index, 1)
+        page_blocks = EXTRACT_DOCUMENT.previous_blocks_for_page(index, 1)
+
+        self.assertEqual(index.pages_by_number[1]["source_fingerprint"], "fp-1")
+        self.assertEqual(page_assets[0]["id"], "a1")
+        self.assertEqual(page_blocks[0]["id"], "p1-b1")
+        page_assets[0]["path"] = "/tmp/changed.png"
+        page_blocks[0]["text"] = "Changed"
+        self.assertEqual(payload["assets"][0]["path"], "/tmp/a1.png")
+        self.assertEqual(payload["blocks"][0]["text"], "Hello")
+
+    def test_resolve_page_source_fingerprint_reuses_native_without_raster_fallback(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            EXTRACT_DOCUMENT,
+            "page_source_pdf_native_fingerprint",
+            return_value="pdfnative:fp-1",
+        ), mock.patch.object(
+            EXTRACT_DOCUMENT, "page_source_raster_fingerprint"
+        ) as raster_fingerprint:
+            fingerprint, matches_previous = (
+                EXTRACT_DOCUMENT.resolve_page_source_fingerprint(
+                    object(), previous_fingerprint="pdfnative:fp-1"
+                )
+            )
+
+        self.assertEqual(fingerprint, "pdfnative:fp-1")
+        self.assertTrue(matches_previous)
+        raster_fingerprint.assert_not_called()
+
+    def test_resolve_page_source_fingerprint_uses_raster_fallback_for_legacy_cache(
+        self,
+    ) -> None:
+        with mock.patch.object(
+            EXTRACT_DOCUMENT,
+            "page_source_pdf_native_fingerprint",
+            return_value="pdfnative:fp-2",
+        ), mock.patch.object(
+            EXTRACT_DOCUMENT,
+            "page_source_raster_fingerprint",
+            return_value="raster:legacy-fp",
+        ) as raster_fingerprint:
+            fingerprint, matches_previous = (
+                EXTRACT_DOCUMENT.resolve_page_source_fingerprint(
+                    object(), previous_fingerprint="legacy-fp"
+                )
+            )
+
+        self.assertEqual(fingerprint, "pdfnative:fp-2")
+        self.assertTrue(matches_previous)
+        raster_fingerprint.assert_called_once()
 
 
 if __name__ == "__main__":
