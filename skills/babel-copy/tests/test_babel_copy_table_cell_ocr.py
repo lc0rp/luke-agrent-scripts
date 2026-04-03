@@ -118,6 +118,44 @@ EXTRACT_DOCUMENT = load_module(
 
 
 class TableCellOcrTests(unittest.TestCase):
+    def test_assign_blocks_to_tables_uses_page_band_index_without_cross_cell_leakage(
+        self,
+    ) -> None:
+        page_blocks = [
+            {"id": "p1-b1", "bbox": [10.0, 10.0, 40.0, 20.0], "role": "body", "table": None},
+            {"id": "p1-b2", "bbox": [110.0, 10.0, 140.0, 20.0], "role": "body", "table": None},
+            {"id": "p1-b3", "bbox": [210.0, 10.0, 240.0, 20.0], "role": "body", "table": None},
+        ]
+        tables = [
+            {
+                "id": "p1-table-1",
+                "cells": [
+                    {
+                        "id": "p1-r0-c0",
+                        "row_index": 0,
+                        "col_index": 0,
+                        "bbox": [0.0, 0.0, 100.0, 40.0],
+                        "block_ids": [],
+                    },
+                    {
+                        "id": "p1-r0-c1",
+                        "row_index": 0,
+                        "col_index": 1,
+                        "bbox": [100.0, 0.0, 200.0, 40.0],
+                        "block_ids": [],
+                    },
+                ],
+            }
+        ]
+
+        EXTRACT_DOCUMENT.assign_blocks_to_tables(page_blocks, tables)
+
+        self.assertEqual(tables[0]["cells"][0]["block_ids"], ["p1-b1"])
+        self.assertEqual(tables[0]["cells"][1]["block_ids"], ["p1-b2"])
+        self.assertIsNone(page_blocks[2]["table"])
+        self.assertEqual(page_blocks[0]["role"], "table_cell")
+        self.assertEqual(page_blocks[1]["role"], "table_cell")
+
     def test_fill_empty_cells_with_page_ocr_lines(self) -> None:
         tables = [
             {
@@ -192,6 +230,31 @@ class TableCellOcrTests(unittest.TestCase):
         )
 
         self.assertEqual(page_blocks[0]["text"], "Name: Jane Doe")
+
+    def test_populate_table_cell_texts_uses_block_id_lookup(self) -> None:
+        tables = [
+            {
+                "id": "p1-table-1",
+                "cells": [
+                    {
+                        "id": "p1-r0-c0",
+                        "row_index": 0,
+                        "col_index": 0,
+                        "bbox": [0.0, 0.0, 120.0, 60.0],
+                        "block_ids": ["p1-b2", "missing", "p1-b1"],
+                        "text": "",
+                    }
+                ],
+            }
+        ]
+        page_blocks = [
+            {"id": "p1-b1", "bbox": [0.0, 10.0, 120.0, 20.0], "text": "First"},
+            {"id": "p1-b2", "bbox": [0.0, 4.0, 120.0, 9.0], "text": "Header"},
+        ]
+
+        EXTRACT_DOCUMENT.populate_table_cell_texts(tables, page_blocks)
+
+        self.assertEqual(tables[0]["cells"][0]["text"], "Header\nFirst")
 
 
 if __name__ == "__main__":

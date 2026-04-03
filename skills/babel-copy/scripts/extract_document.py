@@ -2131,11 +2131,49 @@ def page_ocr_lines(
     return extracted
 
 
+class PageBandIndex:
+    def __init__(self, items: list[dict], *, band_height: float = 36.0):
+        self._items = items
+        self._band_height = max(float(band_height), 1.0)
+        self._item_rects = [fitz.Rect(item["bbox"]) for item in items]
+        self._bands: dict[int, list[int]] = defaultdict(list)
+        for index, rect in enumerate(self._item_rects):
+            start_band, end_band = self._band_span(rect)
+            for band in range(start_band, end_band + 1):
+                self._bands[band].append(index)
+
+    def _band_span(self, rect: fitz.Rect) -> tuple[int, int]:
+        top = max(0.0, float(rect.y0))
+        bottom = max(top, float(rect.y1) - 0.01)
+        start_band = int(top // self._band_height)
+        end_band = int(bottom // self._band_height)
+        return start_band, end_band
+
+    def query_rect(self, rect: fitz.Rect) -> list[dict]:
+        candidate_indexes: set[int] = set()
+        start_band, end_band = self._band_span(rect)
+        for band in range(start_band, end_band + 1):
+            candidate_indexes.update(self._bands.get(band, ()))
+        matches: list[dict] = []
+        for index in sorted(candidate_indexes):
+            item_rect = self._item_rects[index]
+            if (
+                item_rect.x1 <= rect.x0
+                or item_rect.x0 >= rect.x1
+                or item_rect.y1 <= rect.y0
+                or item_rect.y0 >= rect.y1
+            ):
+                continue
+            matches.append(self._items[index])
+        return matches
+
+
 def cell_ocr_text_from_page_lines(
     cell_rect: fitz.Rect,
     ocr_lines: list[dict],
     *,
     top_fraction: float | None = None,
+    ocr_line_index: PageBandIndex | None = None,
 ) -> str:
     target_rect = cell_rect
     if top_fraction is not None:
@@ -2146,7 +2184,12 @@ def cell_ocr_text_from_page_lines(
             cell_rect.y0 + cell_rect.height * top_fraction,
         )
     texts: list[str] = []
-    for line in ocr_lines:
+    candidate_lines = (
+        ocr_line_index.query_rect(target_rect)
+        if ocr_line_index is not None
+        else ocr_lines
+    )
+    for line in candidate_lines:
         line_rect = fitz.Rect(line["bbox"])
         if (line_rect & target_rect).is_empty:
             continue
@@ -2164,6 +2207,8 @@ def best_text_from_top_lines(
     cell_rect: fitz.Rect,
     current_text: str,
     ocr_lines: list[dict],
+    *,
+    ocr_line_index: PageBandIndex | None = None,
 ) -> str:
     candidates = [normalize_cell_ocr_text(current_text)]
     for fraction in (0.28, 0.34):
@@ -2171,17 +2216,24 @@ def best_text_from_top_lines(
             cell_rect,
             ocr_lines,
             top_fraction=fraction,
+            ocr_line_index=ocr_line_index,
         )
         if candidate:
             candidates.append(candidate)
     return max(candidates, key=score_cell_ocr_text)
 
 
-def assign_blocks_to_tables(page_blocks: list[dict], tables: list[dict]) -> None:
+def assign_blocks_to_tables(
+    page_blocks: list[dict],
+    tables: list[dict],
+    *,
+    page_block_index: PageBandIndex | None = None,
+) -> None:
+    block_index = page_block_index or PageBandIndex(page_blocks)
     for table in tables:
         for cell in table["cells"]:
             cell_rect = fitz.Rect(cell["bbox"])
-            for block in page_blocks:
+            for block in block_index.query_rect(cell_rect):
                 block_rect = fitz.Rect(block["bbox"])
                 center = fitz.Point(
                     (block_rect.x0 + block_rect.x1) / 2,
@@ -2189,7 +2241,8 @@ def assign_blocks_to_tables(page_blocks: list[dict], tables: list[dict]) -> None
                 )
                 if not cell_rect.contains(center):
                     continue
-                cell["block_ids"].append(block["id"])
+                if block["id"] not in cell["block_ids"]:
+                    cell["block_ids"].append(block["id"])
                 block["table"] = {
                     "table_id": table["id"],
                     "cell_id": cell["id"],
@@ -2307,6 +2360,8 @@ def fill_empty_cells_with_ocr(
     tables: list[dict],
     page_blocks: list[dict],
     ocr_lines: list[dict],
+    *,
+    ocr_line_index: PageBandIndex | None = None,
 ) -> None:
     next_index = len(page_blocks) + 1
     for table in tables:
@@ -2317,6 +2372,7 @@ def fill_empty_cells_with_ocr(
             extracted = cell_ocr_text_from_page_lines(
                 cell_rect,
                 ocr_lines,
+                ocr_line_index=ocr_line_index,
             )
             if not extracted or is_probable_artifact(extracted):
                 continue
@@ -2357,6 +2413,8 @@ def enrich_tall_cells_with_ocr(
     tables: list[dict],
     page_blocks: list[dict],
     ocr_lines: list[dict],
+    *,
+    ocr_line_index: PageBandIndex | None = None,
 ) -> None:
     blocks_by_id = {block["id"]: block for block in page_blocks}
     for table in tables:
@@ -2374,9 +2432,23 @@ def enrich_tall_cells_with_ocr(
                 cell_rect,
                 current_text,
                 ocr_lines,
+                ocr_line_index=ocr_line_index,
             )
             if score_cell_ocr_text(enriched) > score_cell_ocr_text(current_text):
                 block["text"] = enriched
+
+
+def populate_table_cell_texts(tables: list[dict], page_blocks: list[dict]) -> None:
+    block_by_id = {block["id"]: block for block in page_blocks}
+    for table in tables:
+        for cell in table["cells"]:
+            blocks_in_cell = [
+                block_by_id[block_id]
+                for block_id in cell["block_ids"]
+                if block_id in block_by_id
+            ]
+            blocks_in_cell.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+            cell["text"] = "\n".join(block["text"] for block in blocks_in_cell)
 
 
 def repeated_role_key(text: str) -> str:
@@ -2662,25 +2734,34 @@ def main() -> int:
                             table["id"] = f"p{page_number}-{table['id']}"
                             table["page_number"] = page_number
                             table["cells"] = build_table_cells(page_number, table)
-                        assign_blocks_to_tables(page_blocks, page_tables)
                         if page_tables:
+                            page_block_index = PageBandIndex(page_blocks)
+                            assign_blocks_to_tables(
+                                page_blocks,
+                                page_tables,
+                                page_block_index=page_block_index,
+                            )
                             with profiler.stage(
                                 "ocr_table_page_lines",
                                 page_number=page_number,
                             ):
                                 table_ocr_lines = page_ocr_lines(layout_image, page.rect)
+                            table_ocr_line_index = PageBandIndex(table_ocr_lines)
                         else:
                             table_ocr_lines = []
+                            table_ocr_line_index = None
                         fill_empty_cells_with_ocr(
                             page_number,
                             page_tables,
                             page_blocks,
                             table_ocr_lines,
+                            ocr_line_index=table_ocr_line_index,
                         )
                         enrich_tall_cells_with_ocr(
                             page_tables,
                             page_blocks,
                             table_ocr_lines,
+                            ocr_line_index=table_ocr_line_index,
                         )
 
                 with profiler.stage("merge_fragments", page_number=page_number):
@@ -2712,7 +2793,11 @@ def main() -> int:
                         table["cells"] = build_table_cells(page_number, table)
                     if textual_tables:
                         page_tables.extend(textual_tables)
-                        assign_blocks_to_tables(page_blocks, textual_tables)
+                        assign_blocks_to_tables(
+                            page_blocks,
+                            textual_tables,
+                            page_block_index=PageBandIndex(page_blocks),
+                        )
                     mark_margin_artifacts(page_blocks)
                     mark_list_items_from_marker_artifacts(page_blocks)
                     mark_two_column_rows(page_blocks)
@@ -2739,13 +2824,7 @@ def main() -> int:
                             assets_dir,
                         )
 
-                for table in page_tables:
-                    for cell in table["cells"]:
-                        blocks_in_cell = [
-                            block for block in page_blocks if block["id"] in cell["block_ids"]
-                        ]
-                        blocks_in_cell.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
-                        cell["text"] = "\n".join(block["text"] for block in blocks_in_cell)
+                populate_table_cell_texts(page_tables, page_blocks)
 
                 page_asset_ids = []
                 for asset in [*page_assets, *signature_assets]:
