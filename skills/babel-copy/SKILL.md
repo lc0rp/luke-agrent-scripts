@@ -17,6 +17,7 @@ Use this skill when the translated document should read like a proper target-lan
 ## Default Output
 
 - Primary artifact: translated PDF
+- Final translated PDF names should be intuitive. Derive them from the original filename plus the target language short form, with an optional timestamp or counter only when needed to distinguish multiple runs of the same file. Avoid generic names such as `translated.pdf`.
 - Working artifacts:
   - source text in Markdown
   - structured block manifest
@@ -31,6 +32,13 @@ Use this skill when the translated document should read like a proper target-lan
 Do not treat translation and page reconstruction as the same problem.
 
 Translation accuracy and visual fidelity are equally important. Do not optimize one by quietly sacrificing the other.
+
+Treat each source file as an independent job.
+
+- if asked to translate multiple files, handle them independently
+- do not infer extraction strategy, translation mode, glossary state, or QA conclusions for one file from artifacts produced for another file
+- only artifacts, inferences, and prior outputs from the same file may be used to continue that file
+- when resuming work, verify that reused artifacts belong to the same source file before trusting them
 
 This skill is deliberately hybrid. Some parts should be scripted, but this is not a 100% scripted workflow. The operator must inspect preview renders, notice when the chosen strategy is wrong, and switch tactics before committing to the final PDF.
 
@@ -177,6 +185,7 @@ Resume and loop-safety expectations:
 
 - `scripts/run_optimization_cycle.py release` now refuses to release a cycle when active babel-copy workers are still running, unless explicitly forced
 - if a run stops mid-cycle, the next automation pass should inspect existing attempt artifacts first and continue from the latest viable translated output instead of assuming the cycle is cleanly aborted
+- when resuming, confirm the artifacts belong to the same source file; outputs from separate file translations do not count as resume state for the current file
 
 When the document is complex, it is acceptable to delegate specific components or blocks to desktop subagents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
 
