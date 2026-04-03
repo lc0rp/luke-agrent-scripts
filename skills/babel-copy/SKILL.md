@@ -25,7 +25,7 @@ Use this skill when the translated document should read like a proper target-lan
   - translated text in Markdown or JSON blocks
   - rebuilt rich-layout source, preferably `.typ`
   - QA renders and notes
-  - `run-manifest.json` with canonical artifact paths for QA and optimizer hand-off
+  - `run-manifest.json` with canonical artifact paths for the current translation run
 
 ## Core Rule
 
@@ -181,10 +181,9 @@ Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 3. collect the JSON-only subagent replies into `fragment-merge-responses.json`
 4. rerun `uv run --script scripts/extract_document.py ... --fragment-merge-responses-json fragment-merge-responses.json`
 
-Resume and loop-safety expectations:
+Resume expectations:
 
-- `scripts/run_optimization_cycle.py release` now refuses to release a cycle when active babel-copy workers are still running, unless explicitly forced
-- if a run stops mid-cycle, the next automation pass should inspect existing attempt artifacts first and continue from the latest viable translated output instead of assuming the cycle is cleanly aborted
+- if a run stops mid-session, inspect existing artifacts first and continue from the latest viable translated output instead of assuming the session is cleanly aborted
 - when resuming, confirm the artifacts belong to the same source file; outputs from separate file translations do not count as resume state for the current file
 
 When the document is complex, it is acceptable to delegate specific components or blocks to desktop subagents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
@@ -226,7 +225,7 @@ Current bundled rebuild path:
 - `uv run --script scripts/export_typst_pdf.py`
 - `uv run --script scripts/build_final_pdf.py`
 
-These fields are written into `run-manifest.json` so `babel-copy-qa` and `babel-copy-optimizer` can locate the originating run deterministically.
+These fields are written into `run-manifest.json` so the current run can be resumed and inspected deterministically.
 
 This now supports:
 
