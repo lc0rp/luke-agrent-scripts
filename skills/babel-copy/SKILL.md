@@ -215,7 +215,7 @@ Desktop translation flow for Codex Desktop or Claude Desktop:
 
 Desktop translation batching is prompt-budgeted rather than fixed to a small block count. The preparer packs contiguous blocks up to a character budget, keeps page runs together when a batch is already mostly full, and uses `--batch-size` only as a secondary safety cap.
 
-When `translated_blocks.json` already exists beside `blocks.json`, translation prepare reuses translations for blocks whose extraction fingerprint is unchanged and only emits requests for the remaining blocks.
+When `translated_blocks.json` already exists beside `blocks.json`, translation prepare reuses translations only when the cached file matches the same source/target language pair and the block extraction fingerprint is unchanged; it emits requests for everything else.
 
 Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
