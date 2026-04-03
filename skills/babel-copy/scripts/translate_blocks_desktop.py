@@ -384,6 +384,12 @@ def main() -> int:
             cli_output_dir=getattr(args, "profiler_output_dir", None),
             command=f"translate_blocks_desktop:{args.command}",
             search_from=Path.cwd(),
+            context_paths=[
+                Path(getattr(args, "blocks_json", ".")).expanduser(),
+                Path(getattr(args, "output_json", ".")).expanduser(),
+                Path(getattr(args, "requests_json", ".")).expanduser(),
+                Path(getattr(args, "responses_json", ".")).expanduser(),
+            ],
         ),
         command=f"translate_blocks_desktop:{args.command}",
         metadata={"command": args.command},

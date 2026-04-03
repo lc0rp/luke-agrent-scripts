@@ -60,7 +60,9 @@ Output layout expectations:
 - create `wip/` and `completed/` before writing artifacts
 - keep extracted manifests, translation request files, renders, and other intermediate outputs under `wip/`
 - when profiling is enabled, create the profiles base directory under `wip/` rather than under the skill directory or repo root
-- for a given file run, create one shared `run-{timestamp}` directory under that `wip/` profiles directory and write every instrumented `{command}.json` profile for that run into that same directory
+- for a given file run, create one shared `runs-{timestamp}` directory under that `wip/` profiles directory
+- within that shared run directory, create one subdirectory per instrumented command
+- if a command is called more than once during that run, write one `call-{timestamp}.json` profile per call under that command subdirectory
 - copy final user-facing deliverables into `completed/` as soon as each file is completed, using clear filenames so they are easy to find without navigating nested subdirectories
 - when more than one final artifact matters for the user, copy all of them into `completed/`
 
@@ -84,7 +86,7 @@ Execution rules:
 - `--profiler-commands` or `PROFILER_COMMANDS` may restrict profiling to specific instrumented commands; empty means `all`
 - `--profiler-output-dir` or `PROFILER_OUTPUT_DIR` selects the base directory under `wip/`; empty defaults to `wip/profiles`
 - create the run timestamp once per file run and reuse it across all instrumented commands for that run
-- profiler output is written as `<wip>/<profiler-dir>/run-{timestamp}/{command}.json`
+- profiler output is written as `<wip>/<profiler-dir>/runs-{timestamp}/{command}/call-{timestamp}.json`
 - when adding a new babel-copy script or repairing one that lacks inline metadata, run:
   - `uv init --script <script.py>`
   - add all direct dependencies to the script metadata

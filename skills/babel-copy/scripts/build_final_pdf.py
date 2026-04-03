@@ -634,6 +634,7 @@ def main() -> int:
             cli_output_dir=args.profiler_output_dir,
             command="build_final_pdf",
             search_from=Path.cwd(),
+            context_paths=[source_pdf, translated_blocks_json, output_pdf],
         ),
         command="build_final_pdf",
         metadata={

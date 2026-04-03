@@ -2104,6 +2104,7 @@ def main() -> int:
             cli_output_dir=args.profiler_output_dir,
             command="extract_document",
             search_from=Path.cwd(),
+            context_paths=[output_dir],
         ),
         command="extract_document",
         metadata={

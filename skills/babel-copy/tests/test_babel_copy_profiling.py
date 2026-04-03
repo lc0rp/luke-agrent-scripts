@@ -70,9 +70,11 @@ BUILD_FINAL_PDF = load_module(
 
 
 class ProfilingSupportTests(unittest.TestCase):
-    def test_resolve_profile_path_supports_env_output_dir(self) -> None:
+    def test_resolve_profile_path_uses_wip_profiles_and_command_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             workspace = Path(tmp_raw)
+            output_root = workspace / "job-output"
+            wip_dir = output_root / "wip"
             (workspace / ".env").write_text(
                 "ENABLE_PROFILER=1\n"
                 "PROFILER_OUTPUT_DIR=profiles\n"
@@ -84,12 +86,14 @@ class ProfilingSupportTests(unittest.TestCase):
                     cli_output_dir=None,
                     command="extract_document",
                     search_from=workspace,
+                    context_paths=[output_root],
                 )
         self.assertIsNotNone(path)
         assert path is not None
-        self.assertEqual(path.name, "extract_document.json")
-        self.assertEqual(path.parent.parent, (workspace / "profiles").resolve())
-        self.assertTrue(path.parent.name.startswith("run-"))
+        self.assertTrue(path.name.startswith("call-"))
+        self.assertEqual(path.parent.name, "extract_document")
+        self.assertTrue(path.parent.parent.name.startswith("runs-"))
+        self.assertEqual(path.parent.parent.parent, (wip_dir / "profiles").resolve())
 
     def test_resolve_profile_path_honors_command_filter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
@@ -105,14 +109,57 @@ class ProfilingSupportTests(unittest.TestCase):
                     cli_output_dir=None,
                     command="extract_document",
                     search_from=workspace,
+                    context_paths=[workspace / "job-output"],
                 )
         self.assertIsNone(path)
+
+    def test_resolve_profile_path_reuses_run_dir_and_separates_command_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            output_root = workspace / "job-output"
+            (workspace / ".env").write_text(
+                "ENABLE_PROFILER=1\n"
+                "PROFILER_OUTPUT_DIR=profiles\n"
+            )
+            with mock.patch.dict(os.environ, {}, clear=True):
+                first = PROFILING.resolve_profile_path(
+                    cli_enabled=False,
+                    cli_commands=None,
+                    cli_output_dir=None,
+                    command="build_final_pdf",
+                    search_from=workspace,
+                    context_paths=[output_root],
+                )
+                second = PROFILING.resolve_profile_path(
+                    cli_enabled=False,
+                    cli_commands=None,
+                    cli_output_dir=None,
+                    command="build_final_pdf",
+                    search_from=workspace,
+                    context_paths=[output_root],
+                )
+                third = PROFILING.resolve_profile_path(
+                    cli_enabled=False,
+                    cli_commands=None,
+                    cli_output_dir=None,
+                    command="extract_document",
+                    search_from=workspace,
+                    context_paths=[output_root],
+                )
+        assert first is not None and second is not None and third is not None
+        self.assertEqual(first.parent, second.parent)
+        self.assertNotEqual(first.name, second.name)
+        self.assertEqual(first.parent.parent, third.parent.parent)
+        self.assertEqual(third.parent.name, "extract_document")
 
     def test_translate_prepare_writes_profile_from_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             workspace = Path(tmp_raw)
-            blocks_json = workspace / "blocks.json"
-            output_json = workspace / "requests.json"
+            output_root = workspace / "job-output"
+            wip_dir = output_root / "wip"
+            wip_dir.mkdir(parents=True)
+            blocks_json = wip_dir / "blocks.json"
+            output_json = wip_dir / "requests.json"
             blocks_json.write_text(
                 json.dumps(
                     {
@@ -148,8 +195,8 @@ class ProfilingSupportTests(unittest.TestCase):
                 os.chdir(old_cwd)
             self.assertEqual(result, 0)
             profile_matches = list(
-                (workspace / "profiles").glob(
-                    "run-*/translate_blocks_desktop-prepare.json"
+                (wip_dir / "profiles").glob(
+                    "runs-*/translate_blocks_desktop-prepare/call-*.json"
                 )
             )
             self.assertEqual(len(profile_matches), 1)
@@ -162,12 +209,14 @@ class ProfilingSupportTests(unittest.TestCase):
     def test_build_final_pdf_writes_profile_with_cli_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             workspace = Path(tmp_raw)
+            output_root = workspace / "job-output"
+            wip_dir = output_root / "wip"
+            wip_dir.mkdir(parents=True)
             source_pdf = workspace / "input.pdf"
             source_pdf.write_bytes(b"%PDF-1.4\n")
-            translated_json = workspace / "translated.json"
+            translated_json = wip_dir / "translated.json"
             translated_json.write_text(json.dumps({"pages": [], "blocks": []}))
-            output_pdf = workspace / "out.pdf"
-            profile_json = workspace / "build.profile.json"
+            output_pdf = wip_dir / "out.pdf"
 
             with mock.patch.object(
                 BUILD_FINAL_PDF,
@@ -182,12 +231,12 @@ class ProfilingSupportTests(unittest.TestCase):
                     str(output_pdf),
                     "--profiler",
                     "--profiler-output-dir",
-                    str(workspace / "profiles"),
+                    "profiles",
                 ]
                 with mock.patch.object(sys, "argv", argv):
                     result = BUILD_FINAL_PDF.main()
             self.assertEqual(result, 0)
-            profile_matches = list((workspace / "profiles").glob("run-*/build_final_pdf.json"))
+            profile_matches = list((wip_dir / "profiles").glob("runs-*/build_final_pdf/call-*.json"))
             self.assertEqual(len(profile_matches), 1)
             profile_json = profile_matches[0]
             payload = json.loads(profile_json.read_text())

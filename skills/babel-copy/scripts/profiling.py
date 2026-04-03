@@ -10,13 +10,18 @@ import time
 import tracemalloc
 from typing import Iterator
 
+SESSION_FILENAME = ".profiler-session.json"
+SESSION_REUSE_WINDOW_SECONDS = 6 * 60 * 60
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def profiler_run_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def profiler_timestamp(compact: bool = True) -> str:
+    if compact:
+        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return utc_now_iso()
 
 
 def _dotenv_candidates(search_from: Path | None = None) -> list[Path]:
@@ -229,6 +234,69 @@ def parse_profiler_commands(raw: str | None) -> set[str] | None:
     return values or None
 
 
+def infer_wip_dir(
+    *,
+    context_paths: list[Path] | None,
+    search_from: Path | None = None,
+) -> Path:
+    for raw_path in context_paths or []:
+        path = raw_path.expanduser().resolve()
+        treat_as_directory = path.is_dir() or (not path.exists() and path.suffix == "")
+        anchors = [path, *path.parents] if treat_as_directory else [path.parent, *path.parent.parents]
+        for anchor in anchors:
+            if anchor.name == "wip":
+                return anchor
+        for anchor in anchors:
+            candidate = anchor / "wip"
+            if candidate.exists():
+                return candidate.resolve()
+        if treat_as_directory:
+            return (path / "wip").resolve()
+    if search_from is not None:
+        resolved = search_from.expanduser().resolve()
+        if resolved.name == "wip":
+            return resolved
+        return (resolved / "wip").resolve()
+    return (Path.cwd() / "wip").resolve()
+
+
+def _read_session_file(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def resolve_run_id(profiles_base_dir: Path) -> str:
+    session_path = profiles_base_dir / SESSION_FILENAME
+    now = time.time()
+    session = _read_session_file(session_path)
+    if session is not None:
+        run_id = str(session.get("run_id", "")).strip()
+        last_updated = float(session.get("last_updated_epoch", 0) or 0)
+        if run_id and (now - last_updated) <= SESSION_REUSE_WINDOW_SECONDS:
+            session["last_updated_epoch"] = now
+            session["last_updated_at"] = utc_now_iso()
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(json.dumps(session, indent=2, ensure_ascii=False))
+            return run_id
+    run_id = profiler_timestamp()
+    session_payload = {
+        "run_id": run_id,
+        "created_at": utc_now_iso(),
+        "last_updated_at": utc_now_iso(),
+        "last_updated_epoch": now,
+    }
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(json.dumps(session_payload, indent=2, ensure_ascii=False))
+    return run_id
+
+
 def resolve_profile_path(
     *,
     cli_enabled: bool,
@@ -236,6 +304,7 @@ def resolve_profile_path(
     cli_output_dir: str | None,
     command: str,
     search_from: Path | None = None,
+    context_paths: list[Path] | None = None,
 ) -> Path | None:
     env_output_before = os.environ.get("PROFILER_OUTPUT_DIR")
     dotenv_path = load_babel_copy_dotenv(search_from)
@@ -254,11 +323,15 @@ def resolve_profile_path(
     )
     if not raw_output_dir:
         raw_output_dir = "profiles"
-    base_dir = Path.cwd()
-    if cli_output_dir is None and env_output_before is None and dotenv_path is not None:
-        base_dir = dotenv_path.parent
+    wip_dir = infer_wip_dir(context_paths=context_paths, search_from=search_from)
+    base_dir = wip_dir
+    if cli_output_dir is None and env_output_before is None and dotenv_path is not None and not Path(raw_output_dir).is_absolute():
+        base_dir = wip_dir
     path = Path(raw_output_dir).expanduser()
     if not path.is_absolute():
         path = base_dir / path
-    run_dir = path / f"run-{profiler_run_timestamp()}"
-    return (run_dir / f"{normalized_command}.json").resolve()
+    profiles_base_dir = path.resolve()
+    run_id = resolve_run_id(profiles_base_dir)
+    run_dir = profiles_base_dir / f"runs-{run_id}"
+    command_dir = run_dir / normalized_command
+    return (command_dir / f"call-{profiler_timestamp()}.json").resolve()
