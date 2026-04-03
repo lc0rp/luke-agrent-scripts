@@ -35,9 +35,9 @@ TRANSLATION_RUNTIME = load_module(
     "test_translation_runtime",
     REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translation_runtime.py",
 )
-TRANSLATE_BLOCKS_CODEX = load_module(
-    "test_translate_blocks_codex",
-    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_codex.py",
+TRANSLATE_BLOCKS_DESKTOP = load_module(
+    "test_translate_blocks_desktop",
+    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_desktop.py",
 )
 RUN_OPTIMIZATION_CYCLE = load_module(
     "test_run_optimization_cycle",
@@ -116,12 +116,12 @@ class TranslateBlocksCodexTests(unittest.TestCase):
 
     def test_detect_runtime_mode_prefers_explicit_claude_override(self) -> None:
         with mock.patch.dict(os.environ, {"BABEL_COPY_RUNTIME_MODE": "claude"}, clear=False):
-            mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode("auto")
+            mode = TRANSLATE_BLOCKS_DESKTOP.detect_runtime_mode("auto")
         self.assertEqual(mode, "claude")
 
     def test_detect_runtime_mode_defaults_to_codex(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
-            mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode("auto")
+            mode = TRANSLATE_BLOCKS_DESKTOP.detect_runtime_mode("auto")
         self.assertEqual(mode, "codex")
 
     def test_prepare_request_payload_writes_desktop_batches(self) -> None:
@@ -149,7 +149,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                     }
                 )
             )
-            result = TRANSLATE_BLOCKS_CODEX.prepare_request_payload(
+            result = TRANSLATE_BLOCKS_DESKTOP.prepare_request_payload(
                 blocks_json=blocks_json,
                 output_json=requests_json,
                 source_lang="French",
@@ -208,7 +208,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                     }
                 )
             )
-            result = TRANSLATE_BLOCKS_CODEX.apply_response_payload(
+            result = TRANSLATE_BLOCKS_DESKTOP.apply_response_payload(
                 blocks_json=blocks_json,
                 requests_json=requests_json,
                 responses_json=responses_json,

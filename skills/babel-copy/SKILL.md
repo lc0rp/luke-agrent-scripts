@@ -169,10 +169,10 @@ Translate with context:
 
 Desktop translation flow for Codex Desktop or Claude Desktop:
 
-1. run `uv run --script scripts/translate_blocks_codex.py prepare ... --output-json translation-requests.json`
+1. run `uv run --script scripts/translate_blocks_desktop.py prepare ... --output-json translation-requests.json`
 2. dispatch each request prompt to a desktop subagent in the active app
 3. collect the JSON-only subagent replies into `translation-responses.json`
-4. run `uv run --script scripts/translate_blocks_codex.py apply-responses ... --requests-json translation-requests.json --responses-json translation-responses.json --output-json translated_blocks.json`
+4. run `uv run --script scripts/translate_blocks_desktop.py apply-responses ... --requests-json translation-requests.json --responses-json translation-responses.json --output-json translated_blocks.json`
 
 Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
@@ -323,7 +323,7 @@ This skill now ships its own bundled scripts:
 - `scripts/export_typst_pdf.py`: Typst CLI PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
-- `scripts/translate_blocks_codex.py`: block translation request prep/apply for desktop subagents
+- `scripts/translate_blocks_desktop.py`: block translation request prep/apply for desktop subagents
 - each Python script includes inline uv metadata and should be invoked with `uv run --script`
 - each Python script is expected to ship with an adjacent `.lock` file
 

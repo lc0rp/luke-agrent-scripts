@@ -129,7 +129,7 @@ Edit the real `babel-copy` source tree.
 Typical files:
 
 - `scripts/extract_document.py`
-- `scripts/translate_blocks_codex.py`
+- `scripts/translate_blocks_desktop.py`
 - `scripts/build_final_pdf.py`
 - `scripts/rebuild_docx.py`
 - `scripts/core.py`
