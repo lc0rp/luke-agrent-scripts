@@ -262,6 +262,16 @@ def overlay_occupancy_rect(block: dict, page_blocks: list[dict], page_rect: fitz
     return render_rect_for_block(block, page_blocks, page_rect)
 
 
+def should_ignore_artifact_obstacle(block: dict) -> bool:
+    if block.get("role") != "artifact":
+        return False
+    bbox = block.get("bbox") or [0, 0, 0, 0]
+    width = max(0.0, float(bbox[2]) - float(bbox[0]))
+    height = max(0.0, float(bbox[3]) - float(bbox[1]))
+    text = str(block.get("translated_text") or block.get("text") or "").strip()
+    return width * height <= 4.0 and len(text) <= 1
+
+
 def filtered_payload_for_page(payload: dict, page_number: int, assets_by_id: dict[str, dict]) -> dict:
     page = next(page for page in payload.get("pages", []) if int(page["page_number"]) == page_number)
     blocks = [block for block in payload.get("blocks", []) if int(block["page_number"]) == page_number]
@@ -323,6 +333,8 @@ def render_overlay_page(
     preserved_ids = preserved_overlay_ids(page_blocks)
     occupied_rects: list[tuple[str, fitz.Rect, str]] = []
     for block in page_blocks:
+        if should_ignore_artifact_obstacle(block):
+            continue
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
             occupied_rects.append((block["id"], overlay_occupancy_rect(block, page_blocks, out_page.rect), "preserved"))
             continue

@@ -68,9 +68,7 @@ Example:
 
 ```bash
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-python /Users/luke/Documents/dev/luke-agent-scripts/skills/babel-copy/scripts/run_babel_copy.py \
-  "/abs/path/input.pdf" \
-  --output-dir "/abs/path/output/F2-optimizer-${timestamp}"
+mkdir -p "/abs/path/output/F2-optimizer-${timestamp}"
 ```
 
 ## Optimization Loop

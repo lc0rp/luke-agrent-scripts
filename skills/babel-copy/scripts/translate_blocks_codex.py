@@ -1,49 +1,68 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#   "openai==2.29.0",
-# ]
+# dependencies = []
 # [tool.uv]
 # exclude-newer = "2026-03-19T14:37:22Z"
 # ///
 from __future__ import annotations
 
 import argparse
-import base64
 import json
-import os
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
-from openai import OpenAI
 from translation_runtime import (
-    DOTENV_FILENAME,
     TRANSLATION_PROVIDER_CHOICES,
-    anthropic_model_name,
-    claude_cli_flags,
-    codex_model_name,
     detect_runtime_mode,
-    openai_model_name,
-    parse_dotenv,
     translation_provider,
 )
 
-AUTH_LOG_PREFIX = "babel_copy_translation"
-MIN_API_KEY_LENGTH = 20
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_API_VERSION = "2023-06-01"
+DESKTOP_TRANSLATION_BACKENDS = {"auto", "codex", "claude"}
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Translate babel-copy blocks with Codex or Claude Code")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    commands = {"run", "prepare", "apply-responses"}
+    if not raw_argv or raw_argv[0] not in commands:
+        raw_argv = ["run", *raw_argv]
+
+    parser = argparse.ArgumentParser(
+        description="Translate babel-copy blocks through direct providers or a desktop prepare/apply flow"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser(
+        "run", help="Translate blocks directly with API or Google providers"
+    )
+    add_translation_io_arguments(run_parser)
+
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        help="Write desktop-subagent translation requests",
+    )
+    prepare_parser.add_argument("blocks_json")
+    prepare_parser.add_argument("--output-json", required=True)
+    prepare_parser.add_argument("--source-lang", default="French")
+    prepare_parser.add_argument("--target-lang", default="English")
+    prepare_parser.add_argument("--model")
+    prepare_parser.add_argument("--batch-size", type=int, default=18)
+    prepare_parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
+
+    apply_parser = subparsers.add_parser(
+        "apply-responses",
+        help="Apply desktop-subagent translation responses and produce translated_blocks.json",
+    )
+    apply_parser.add_argument("blocks_json")
+    apply_parser.add_argument("--requests-json", required=True)
+    apply_parser.add_argument("--responses-json", required=True)
+    apply_parser.add_argument("--output-json", required=True)
+    apply_parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
+    return parser.parse_args(raw_argv)
+
+
+def add_translation_io_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("blocks_json")
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--source-lang", default="French")
@@ -51,10 +70,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model")
     parser.add_argument("--batch-size", type=int, default=18)
     parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
-    return parser.parse_args()
 
 
-def translatable_blocks(payload: dict) -> list[dict]:
+def translatable_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     blocks = []
     for block in payload.get("blocks", []):
         if block.get("keep_original") or block.get("role") == "artifact":
@@ -66,137 +84,13 @@ def translatable_blocks(payload: dict) -> list[dict]:
     return blocks
 
 
-def emit_log(event: str, **fields: Any) -> None:
-    payload = {"event": event, **fields}
-    print(f"{AUTH_LOG_PREFIX} {json.dumps(payload, ensure_ascii=True, sort_keys=True)}", file=sys.stderr)
-
-
-def redact_last4(value: str | None) -> str | None:
-    if not value:
-        return None
-    return value[-4:]
-
-
-def load_json_file(path: Path) -> dict[str, Any]:
-    try:
-        return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def decode_jwt_payload(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) < 2:
-        return {}
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
-    try:
-        decoded = base64.urlsafe_b64decode(payload + padding)
-    except (ValueError, OSError):
-        return {}
-    try:
-        return json.loads(decoded)
-    except json.JSONDecodeError:
-        return {}
-
-
-def active_codex_account_email(codex_home: Path) -> str | None:
-    registry = load_json_file(codex_home / "accounts" / "registry.json")
-    active_key = str(registry.get("active_account_key") or "").strip()
-    accounts = registry.get("accounts")
-    if isinstance(accounts, list):
-        for entry in accounts:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("account_key") or "").strip() == active_key:
-                email = str(entry.get("email") or "").strip()
-                if email:
-                    return email
-    auth_payload = load_json_file(codex_home / "auth.json")
-    tokens = auth_payload.get("tokens")
-    if isinstance(tokens, dict):
-        claims = decode_jwt_payload(str(tokens.get("id_token") or ""))
-        email = str(claims.get("email") or "").strip()
-        if email:
-            return email
-    return None
-
-
-def inspect_codex_auth_context() -> dict[str, Any]:
-    codex_home = Path.home() / ".codex"
-    auth_payload = load_json_file(codex_home / "auth.json")
-    auth_mode = str(auth_payload.get("auth_mode") or "unknown").strip() or "unknown"
-    email = active_codex_account_email(codex_home) if auth_mode == "chatgpt" else None
-    api_key = str(auth_payload.get("OPENAI_API_KEY") or "").strip()
-    auth_path = "codex_cli_unknown"
-    if auth_mode == "chatgpt":
-        auth_path = "codex_cli_chatgpt"
-    elif auth_mode == "api_key" or api_key:
-        auth_path = "codex_cli_api_key"
-    return {
-        "auth_mode": auth_mode,
-        "account_email": email,
-        "api_key_last4": redact_last4(api_key),
-        "provider": "openai",
-        "auth_path": auth_path,
-        "config_path": str((codex_home / "config.toml").resolve()),
-    }
-
-
-def inspect_claude_auth_context() -> dict[str, Any]:
-    claude_home = Path.home() / ".claude"
-    auth_path = "claude_code_cli"
-    return {
-        "auth_mode": "subscription_or_local_auth",
-        "account_email": None,
-        "api_key_last4": None,
-        "provider": "anthropic",
-        "auth_path": auth_path,
-        "config_path": str(claude_home.resolve()),
-        "config_present": claude_home.exists(),
-    }
-
-
-def invalid_api_key_reason(api_key: str | None) -> str | None:
-    key = str(api_key or "").strip()
-    if not key:
-        return "missing"
-    if len(key) < MIN_API_KEY_LENGTH:
-        return "too_short"
-    lowered = key.lower()
-    if lowered in {"placeholder", "changeme", "your_api_key", "openai_api_key", "anthropic_api_key"}:
-        return "placeholder"
-    if set(lowered) <= {"x", "*", ".", "-", "_"}:
-        return "placeholder"
-    return None
-
-
-def api_key_candidates(cwd: Path, env_var: str, source_prefix: str) -> list[dict[str, str]]:
-    candidates: list[dict[str, str]] = []
-    dotenv_path = cwd / DOTENV_FILENAME
-    dotenv_values = parse_dotenv(dotenv_path) if dotenv_path.exists() else {}
-    dotenv_key = str(dotenv_values.get(env_var) or "").strip()
-    if dotenv_key:
-        candidates.append({"source": f"dotenv_{source_prefix}", "api_key": dotenv_key})
-    env_key = str(os.environ.get(env_var) or "").strip()
-    if env_key:
-        candidates.append({"source": f"env_{source_prefix}", "api_key": env_key})
-    return candidates
-
-
-def resolve_openai_api_candidates(cwd: Path) -> list[dict[str, str]]:
-    return api_key_candidates(cwd, "OPENAI_API_KEY", "openai_api_key")
-
-
-def resolve_anthropic_api_candidates(cwd: Path) -> list[dict[str, str]]:
-    return api_key_candidates(cwd, "ANTHROPIC_API_KEY", "anthropic_api_key")
-
-
-def chunked(items: list[dict], size: int) -> list[list[dict]]:
+def chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
-def build_prompt(batch: list[dict], source_lang: str, target_lang: str) -> str:
+def build_prompt(
+    batch: list[dict[str, Any]], source_lang: str, target_lang: str
+) -> str:
     blocks_payload = []
     for block in batch:
         blocks_payload.append(
@@ -254,515 +148,231 @@ def parse_json_response(raw: str) -> dict[str, str]:
         if isinstance(payload, dict):
             translations = payload.get("translations", payload)
             if isinstance(translations, dict):
-                candidates.append({str(key): str(value) for key, value in translations.items()})
+                candidates.append(
+                    {str(key): str(value) for key, value in translations.items()}
+                )
         index = start + consumed
     if not candidates:
         raise ValueError("No JSON object found in model response")
     return candidates[0]
 
 
-def log_codex_auth_context(*, cwd: Path, model: str | None) -> dict[str, Any]:
-    context = inspect_codex_auth_context()
-    dotenv_path = cwd / DOTENV_FILENAME
-    env_key = str(os.environ.get("OPENAI_API_KEY") or "").strip()
-    emit_log(
-        "codex_exec_auth_context",
-        auth_mode=context.get("auth_mode"),
-        account_email=context.get("account_email"),
-        api_key_last4=context.get("api_key_last4"),
-        auth_path=context.get("auth_path"),
-        provider=context.get("provider"),
-        model=codex_model_name(model),
-        cwd=str(cwd),
-        config_path=context.get("config_path"),
-        dotenv_present=dotenv_path.exists(),
-        env_openai_api_key_present=bool(env_key),
-        env_openai_api_key_last4=redact_last4(env_key),
-    )
-    return context
-
-
-def log_claude_auth_context(*, cwd: Path, model: str | None) -> dict[str, Any]:
-    context = inspect_claude_auth_context()
-    dotenv_path = cwd / DOTENV_FILENAME
-    env_key = str(os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    emit_log(
-        "claude_exec_auth_context",
-        auth_mode=context.get("auth_mode"),
-        account_email=context.get("account_email"),
-        auth_path=context.get("auth_path"),
-        provider=context.get("provider"),
-        model=anthropic_model_name(model),
-        cwd=str(cwd),
-        config_path=context.get("config_path"),
-        config_present=context.get("config_present"),
-        dotenv_present=dotenv_path.exists(),
-        env_anthropic_api_key_present=bool(env_key),
-        env_anthropic_api_key_last4=redact_last4(env_key),
-        cli_flags=claude_cli_flags(),
-    )
-    return context
-
-
-def run_codex(prompt: str, cwd: Path, model: str | None) -> tuple[dict[str, str], dict[str, Any]]:
-    if shutil.which("codex") is None:
-        raise FileNotFoundError("codex executable not found")
-    context = log_codex_auth_context(cwd=cwd, model=model)
-    with tempfile.TemporaryDirectory(prefix="babel-copy-codex-") as tmp_raw:
-        tmp_dir = Path(tmp_raw)
-        output_file = tmp_dir / "last-message.txt"
-        cmd = [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "-C",
-            str(cwd),
-            "--ephemeral",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-o",
-            str(output_file),
-            "-",
-        ]
-        if model:
-            cmd.extend(["--model", model])
-        subprocess.run(cmd, input=prompt, text=True, check=True)
-        return parse_json_response(output_file.read_text()), context
-
-
-def run_claude(prompt: str, cwd: Path, model: str | None) -> tuple[dict[str, str], dict[str, Any]]:
-    if shutil.which("claude") is None:
-        raise FileNotFoundError("claude executable not found")
-    context = log_claude_auth_context(cwd=cwd, model=model)
-    cmd = [
-        "claude",
-        *claude_cli_flags(),
-        "--dangerously-skip-permissions",
-        "--add-dir",
-        str(cwd),
-    ]
-    if "-p" in cmd or "--print" in cmd:
-        cmd.extend(["--tools", ""])
-    if model:
-        cmd.extend(["--model", model])
-    completed = subprocess.run(
-        cmd,
-        input=prompt,
-        text=True,
-        cwd=str(cwd),
-        capture_output=True,
-        check=True,
-    )
-    return parse_json_response(completed.stdout), context
-
-
-def is_invalid_openai_api_key_error(exc: Exception) -> bool:
-    lowered = str(exc).lower()
-    return "invalid_api_key" in lowered or "incorrect api key" in lowered
-
-
-def is_invalid_anthropic_api_key_error(exc: Exception) -> bool:
-    lowered = str(exc).lower()
-    return "authentication_error" in lowered or "invalid x-api-key" in lowered or "invalid api key" in lowered
-
-
-def run_openai(prompt: str, model: str | None, *, api_key: str) -> dict[str, str]:
-    client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model=openai_model_name(model),
-        input=prompt,
-    )
-    raw = response.output_text
-    if not raw:
-        raw = response.model_dump_json()
-    return parse_json_response(raw)
-
-
-def run_anthropic(prompt: str, model: str | None, *, api_key: str) -> dict[str, str]:
-    payload = {
-        "model": anthropic_model_name(model),
-        "max_tokens": 4096,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    request = Request(
-        ANTHROPIC_API_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-        },
-        method="POST",
-    )
-    try:
-        raw = urlopen(request, timeout=60).read().decode("utf-8")
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(body or str(exc)) from exc
-    response_payload = json.loads(raw)
-    fragments = []
-    for item in response_payload.get("content", []):
-        if isinstance(item, dict) and item.get("type") == "text":
-            fragments.append(str(item.get("text") or ""))
-    response_text = "".join(fragments).strip()
-    if not response_text:
-        response_text = raw
-    return parse_json_response(response_text)
-
-
-def google_translate_text(text: str, source_lang: str, target_lang: str) -> str:
-    if not text.strip():
-        return text
-    source_code = {"french": "fr", "english": "en", "spanish": "es"}.get(source_lang.strip().lower(), "auto")
-    target_code = {"french": "fr", "english": "en", "spanish": "es"}.get(target_lang.strip().lower(), "en")
-    url = (
-        "https://translate.googleapis.com/translate_a/single"
-        f"?client=gtx&sl={source_code}&tl={target_code}&dt=t&q={quote(text)}"
-    )
-    raw = urlopen(url, timeout=30).read().decode("utf-8")
-    payload = json.loads(raw)
-    segments = payload[0] if payload and isinstance(payload[0], list) else []
-    translated = "".join(
-        segment[0]
-        for segment in segments
-        if isinstance(segment, list) and segment and isinstance(segment[0], str)
-    )
-    return translated or text
-
-
-def run_google_fallback(batch: list[dict], source_lang: str, target_lang: str) -> dict[str, str]:
-    translations: dict[str, str] = {}
-    for block in batch:
-        translations[str(block["id"])] = google_translate_text(
-            str(block.get("text", "")),
-            source_lang=source_lang,
-            target_lang=target_lang,
-        )
-    return translations
-
-
-def try_api_fallback(
-    prompt: str,
+def prepare_request_payload(
     *,
-    cwd: Path,
-    model: str | None,
-    batch_index: int,
-    total_batches: int,
-    candidates: list[dict[str, str]],
-    run_api,
-    api_name: str,
-    model_name: str,
-    invalid_key_check,
-) -> tuple[dict[str, str], str] | None:
-    dotenv_path = cwd / DOTENV_FILENAME
-    env_present = bool(str(os.environ.get(f"{api_name.upper()}_API_KEY") or "").strip())
-    for candidate in candidates:
-        source = candidate["source"]
-        api_key = candidate["api_key"]
-        unusable_reason = invalid_api_key_reason(api_key)
-        if unusable_reason:
-            emit_log(
-                f"{api_name}_api_candidate_skipped",
-                source=source,
-                reason=unusable_reason,
-                cwd=str(cwd),
-                dotenv_present=dotenv_path.exists(),
-                env_api_key_present=env_present,
-            )
-            continue
-        emit_log(
-            f"{api_name}_api_candidate_selected",
-            source=source,
-            api_key_last4=redact_last4(api_key),
-            model=model_name,
-            cwd=str(cwd),
-            batch=f"{batch_index}/{total_batches}",
-        )
-        try:
-            return run_api(prompt, model=model, api_key=api_key), source
-        except Exception as exc:  # pragma: no cover - live service paths are covered by integration runs
-            emit_log(
-                f"{api_name}_api_candidate_failed",
-                source=source,
-                api_key_last4=redact_last4(api_key),
-                error_type=type(exc).__name__,
-                invalid_api_key=invalid_key_check(exc),
-                batch=f"{batch_index}/{total_batches}",
-            )
-            if invalid_key_check(exc):
-                print(
-                    f"{api_name.capitalize()} API fallback key from {source} is invalid for batch {batch_index}/{total_batches}: {exc}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"{api_name.capitalize()} API fallback failed for batch {batch_index}/{total_batches} using {source}: {exc}",
-                    file=sys.stderr,
-                )
-    return None
-
-
-def try_openai_fallback(
-    prompt: str,
-    *,
-    cwd: Path,
-    model: str | None,
-    batch_index: int,
-    total_batches: int,
-) -> tuple[dict[str, str], str] | None:
-    return try_api_fallback(
-        prompt,
-        cwd=cwd,
-        model=model,
-        batch_index=batch_index,
-        total_batches=total_batches,
-        candidates=resolve_openai_api_candidates(cwd),
-        run_api=run_openai,
-        api_name="openai",
-        model_name=openai_model_name(model),
-        invalid_key_check=is_invalid_openai_api_key_error,
-    )
-
-
-def try_anthropic_fallback(
-    prompt: str,
-    *,
-    cwd: Path,
-    model: str | None,
-    batch_index: int,
-    total_batches: int,
-) -> tuple[dict[str, str], str] | None:
-    return try_api_fallback(
-        prompt,
-        cwd=cwd,
-        model=model,
-        batch_index=batch_index,
-        total_batches=total_batches,
-        candidates=resolve_anthropic_api_candidates(cwd),
-        run_api=run_anthropic,
-        api_name="anthropic",
-        model_name=anthropic_model_name(model),
-        invalid_key_check=is_invalid_anthropic_api_key_error,
-    )
-
-
-def fallback_to_google(
-    batch: list[dict],
-    *,
+    blocks_json: Path,
+    output_json: Path,
     source_lang: str,
     target_lang: str,
-    batch_index: int,
-    total_batches: int,
-    cwd: Path,
-) -> tuple[dict[str, str], str, str]:
-    emit_log("google_translate_fallback_selected", source="google_translate", batch=f"{batch_index}/{total_batches}", cwd=str(cwd))
-    translations = run_google_fallback(batch, source_lang=source_lang, target_lang=target_lang)
-    return translations, "google_translate_fallback", "google_translate"
-
-
-def translate_with_codex_family(
-    prompt: str,
-    batch: list[dict],
-    *,
-    cwd: Path,
+    batch_size: int,
+    provider: str,
     model: str | None,
-    source_lang: str,
-    target_lang: str,
-    batch_index: int,
-    total_batches: int,
-) -> tuple[dict[str, str], str, str]:
-    try:
-        translations, codex_context = run_codex(prompt, cwd=cwd, model=model)
-        backend = str(codex_context.get("auth_path") or "codex_cli_unknown")
-        return translations, "codex_exec", backend
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as exc:
-        print(f"codex exec failed for batch {batch_index}/{total_batches}; falling back to OpenAI API: {exc}", file=sys.stderr)
-        emit_log("codex_exec_failed", batch=f"{batch_index}/{total_batches}", cwd=str(cwd), error_type=type(exc).__name__)
-        openai_result = try_openai_fallback(
-            prompt,
-            cwd=cwd,
-            model=model,
-            batch_index=batch_index,
-            total_batches=total_batches,
-        )
-        if openai_result is not None:
-            translations, backend = openai_result
-            return translations, "openai_responses", backend
-        print(
-            f"OpenAI API fallback unavailable or failed for batch {batch_index}/{total_batches}; falling back to Google Translate",
-            file=sys.stderr,
-        )
-        return fallback_to_google(
-            batch,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            batch_index=batch_index,
-            total_batches=total_batches,
-            cwd=cwd,
-        )
-
-
-def translate_with_claude_family(
-    prompt: str,
-    batch: list[dict],
-    *,
-    cwd: Path,
-    model: str | None,
-    source_lang: str,
-    target_lang: str,
-    batch_index: int,
-    total_batches: int,
-) -> tuple[dict[str, str], str, str]:
-    try:
-        translations, claude_context = run_claude(prompt, cwd=cwd, model=model)
-        backend = str(claude_context.get("auth_path") or "claude_code_cli")
-        return translations, "claude_exec", backend
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as exc:
-        print(f"claude exec failed for batch {batch_index}/{total_batches}; falling back to Anthropic API: {exc}", file=sys.stderr)
-        emit_log("claude_exec_failed", batch=f"{batch_index}/{total_batches}", cwd=str(cwd), error_type=type(exc).__name__)
-        anthropic_result = try_anthropic_fallback(
-            prompt,
-            cwd=cwd,
-            model=model,
-            batch_index=batch_index,
-            total_batches=total_batches,
-        )
-        if anthropic_result is not None:
-            translations, backend = anthropic_result
-            return translations, "anthropic_messages", backend
-        print(
-            f"Anthropic API fallback unavailable or failed for batch {batch_index}/{total_batches}; falling back to Google Translate",
-            file=sys.stderr,
-        )
-        return fallback_to_google(
-            batch,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            batch_index=batch_index,
-            total_batches=total_batches,
-            cwd=cwd,
-        )
-
-
-def main() -> int:
-    args = parse_args()
-    blocks_json = Path(args.blocks_json).expanduser().resolve()
-    output_json = Path(args.output_json).expanduser().resolve()
+) -> Path:
     payload = json.loads(blocks_json.read_text())
     blocks = translatable_blocks(payload)
-    batches = chunked(blocks, max(1, args.batch_size))
+    batches = chunked(blocks, max(1, batch_size))
+    runtime_mode = detect_runtime_mode(provider)
 
-    all_translations: dict[str, str] = {}
-    total = len(batches)
-    provider = translation_provider(args.provider)
-    runtime_mode = detect_runtime_mode(blocks_json.parent, provider)
-    translation_mode = f"{runtime_mode}_exec" if runtime_mode in {"codex", "claude"} else provider
-    auth_path_used = f"{runtime_mode}_unknown" if runtime_mode in {"codex", "claude"} else provider
-    translation_backend_used = auth_path_used
-    backends_used: set[str] = set()
-
+    requests = []
+    total_batches = len(batches)
     for index, batch in enumerate(batches, start=1):
-        prompt = build_prompt(batch, args.source_lang, args.target_lang)
-        if provider == "google":
-            translations, translation_mode, translation_backend_used = fallback_to_google(
-                batch,
-                source_lang=args.source_lang,
-                target_lang=args.target_lang,
-                batch_index=index,
-                total_batches=total,
-                cwd=blocks_json.parent,
-            )
-        elif provider == "openai":
-            openai_result = try_openai_fallback(
-                prompt,
-                cwd=blocks_json.parent,
-                model=args.model,
-                batch_index=index,
-                total_batches=total,
-            )
-            if openai_result is None:
-                translations, translation_mode, translation_backend_used = fallback_to_google(
-                    batch,
-                    source_lang=args.source_lang,
-                    target_lang=args.target_lang,
-                    batch_index=index,
-                    total_batches=total,
-                    cwd=blocks_json.parent,
-                )
-            else:
-                translations, translation_backend_used = openai_result
-                translation_mode = "openai_responses"
-        elif provider == "anthropic":
-            anthropic_result = try_anthropic_fallback(
-                prompt,
-                cwd=blocks_json.parent,
-                model=args.model,
-                batch_index=index,
-                total_batches=total,
-            )
-            if anthropic_result is None:
-                translations, translation_mode, translation_backend_used = fallback_to_google(
-                    batch,
-                    source_lang=args.source_lang,
-                    target_lang=args.target_lang,
-                    batch_index=index,
-                    total_batches=total,
-                    cwd=blocks_json.parent,
-                )
-            else:
-                translations, translation_backend_used = anthropic_result
-                translation_mode = "anthropic_messages"
-        elif provider == "claude" or (provider == "auto" and runtime_mode == "claude"):
-            translations, translation_mode, translation_backend_used = translate_with_claude_family(
-                prompt,
-                batch,
-                cwd=blocks_json.parent,
-                model=args.model,
-                source_lang=args.source_lang,
-                target_lang=args.target_lang,
-                batch_index=index,
-                total_batches=total,
-            )
-        else:
-            translations, translation_mode, translation_backend_used = translate_with_codex_family(
-                prompt,
-                batch,
-                cwd=blocks_json.parent,
-                model=args.model,
-                source_lang=args.source_lang,
-                target_lang=args.target_lang,
-                batch_index=index,
-                total_batches=total,
-            )
+        request_id = f"batch-{index:03d}"
+        requests.append(
+            {
+                "request_id": request_id,
+                "kind": "translation_batch",
+                "batch_index": index,
+                "total_batches": total_batches,
+                "runtime_mode": runtime_mode,
+                "provider": provider,
+                "model": model,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "block_ids": [str(block["id"]) for block in batch],
+                "prompt": build_prompt(batch, source_lang, target_lang),
+                "response_shape": {
+                    "translations": {"block_id": "translated text"},
+                },
+                "dispatch_hint": (
+                    "Send this prompt to a desktop subagent in the active Codex or Claude app. "
+                    "Require a JSON-only reply that matches response_shape."
+                ),
+            }
+        )
 
-        auth_path_used = translation_backend_used
-        backends_used.add(translation_backend_used)
-        all_translations.update(translations)
-        print(f"completed batch {index}/{total}", file=sys.stderr)
+    request_payload = {
+        "schema_version": "1.0",
+        "kind": "babel_copy_translation_requests",
+        "blocks_json": str(blocks_json),
+        "output_json": str(output_json),
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+        "provider": provider,
+        "runtime_mode": runtime_mode,
+        "model": model,
+        "request_count": len(requests),
+        "requests": requests,
+    }
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(request_payload, indent=2, ensure_ascii=False))
+    return output_json
 
+
+def parse_response_entries(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict) and isinstance(payload.get("responses"), list):
+        return [entry for entry in payload["responses"] if isinstance(entry, dict)]
+    if isinstance(payload, list):
+        return [entry for entry in payload if isinstance(entry, dict)]
+    if isinstance(payload, dict):
+        entries = []
+        for key, value in payload.items():
+            entries.append({"request_id": str(key), "response": value})
+        return entries
+    raise SystemExit("Unsupported desktop response payload format")
+
+
+def parse_translation_response_entry(entry: dict[str, Any]) -> dict[str, str]:
+    if isinstance(entry.get("translations"), dict):
+        return {str(key): str(value) for key, value in entry["translations"].items()}
+    for field in ("response_json", "response"):
+        if isinstance(entry.get(field), dict):
+            return parse_json_response(json.dumps(entry[field], ensure_ascii=False))
+    for field in ("response_text", "response"):
+        value = entry.get(field)
+        if isinstance(value, str):
+            return parse_json_response(value)
+    raise SystemExit(f"Unsupported translation response entry: {entry}")
+
+
+def apply_translations_to_payload(
+    payload: dict[str, Any],
+    *,
+    translations: dict[str, str],
+    provider: str,
+    runtime_mode: str,
+) -> dict[str, Any]:
     missing = []
     for block in payload.get("blocks", []):
         if block.get("keep_original") or block.get("role") == "artifact":
             block["translated_text"] = block.get("text", "")
             continue
-        translated = all_translations.get(block["id"])
+        translated = translations.get(str(block["id"]))
         if translated is None:
-            missing.append(block["id"])
+            missing.append(str(block["id"]))
             continue
         block["translated_text"] = translated
 
     if missing:
-        raise SystemExit(f"Missing translations for block ids: {', '.join(missing[:20])}")
+        raise SystemExit(
+            f"Missing translations for block ids: {', '.join(missing[:20])}"
+        )
 
-    payload["translation_mode"] = translation_mode
-    payload["auth_path_used"] = auth_path_used
-    payload["translation_backend_used"] = translation_backend_used
-    payload["translation_backends_used"] = sorted(backends_used)
+    backend = f"{runtime_mode}_desktop_subagent"
+    payload["translation_mode"] = "desktop_subagent"
+    payload["auth_path_used"] = backend
+    payload["translation_backend_used"] = backend
+    payload["translation_backends_used"] = [backend]
     payload["runtime_mode"] = runtime_mode
     payload["translation_provider"] = provider
+    return payload
+
+
+def apply_response_payload(
+    *,
+    blocks_json: Path,
+    requests_json: Path,
+    responses_json: Path,
+    output_json: Path,
+    provider_override: str | None,
+) -> Path:
+    payload = json.loads(blocks_json.read_text())
+    request_payload = json.loads(requests_json.read_text())
+    response_payload = json.loads(responses_json.read_text())
+    entries = parse_response_entries(response_payload)
+    requests = request_payload.get("requests", [])
+    if not isinstance(requests, list):
+        raise SystemExit(f"Unsupported request payload format in {requests_json}")
+
+    request_ids = {
+        str(entry.get("request_id")) for entry in requests if isinstance(entry, dict)
+    }
+    translations: dict[str, str] = {}
+    seen_request_ids: set[str] = set()
+    for entry in entries:
+        request_id = str(entry.get("request_id", "")).strip()
+        if not request_id:
+            raise SystemExit("Each response entry must include request_id")
+        seen_request_ids.add(request_id)
+        if request_ids and request_id not in request_ids:
+            raise SystemExit(f"Unexpected request_id in responses: {request_id}")
+        translations.update(parse_translation_response_entry(entry))
+
+    missing_request_ids = sorted(request_ids - seen_request_ids)
+    if missing_request_ids:
+        raise SystemExit(
+            f"Missing desktop translation responses for request_ids: {', '.join(missing_request_ids[:20])}"
+        )
+
+    provider = translation_provider(
+        provider_override or request_payload.get("provider")
+    )
+    runtime_mode = (
+        str(
+            request_payload.get("runtime_mode") or detect_runtime_mode(provider)
+        ).strip()
+        or "codex"
+    )
+    final_payload = apply_translations_to_payload(
+        payload,
+        translations=translations,
+        provider=provider,
+        runtime_mode=runtime_mode,
+    )
     output_json.parent.mkdir(parents=True, exist_ok=True)
-    output_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-    print(output_json)
-    return 0
+    output_json.write_text(json.dumps(final_payload, indent=2, ensure_ascii=False))
+    return output_json
+
+
+def run_direct_translation(args: argparse.Namespace) -> int:
+    provider = translation_provider(args.provider)
+    if provider in DESKTOP_TRANSLATION_BACKENDS:
+        raise SystemExit(
+            "babel-copy no longer supports direct translation execution. "
+            "Use `prepare` to write subagent requests, dispatch those prompts through the desktop app, "
+            "then use `apply-responses` to build translated_blocks.json."
+        )
+    raise SystemExit(f"Unsupported direct translation provider: {provider}")
+
+
+def main() -> int:
+    args = parse_args()
+    if args.command == "run":
+        return run_direct_translation(args)
+    if args.command == "prepare":
+        blocks_json = Path(args.blocks_json).expanduser().resolve()
+        output_json = Path(args.output_json).expanduser().resolve()
+        provider = translation_provider(args.provider)
+        result = prepare_request_payload(
+            blocks_json=blocks_json,
+            output_json=output_json,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            batch_size=args.batch_size,
+            provider=provider,
+            model=args.model,
+        )
+        print(result)
+        return 0
+    if args.command == "apply-responses":
+        result = apply_response_payload(
+            blocks_json=Path(args.blocks_json).expanduser().resolve(),
+            requests_json=Path(args.requests_json).expanduser().resolve(),
+            responses_json=Path(args.responses_json).expanduser().resolve(),
+            output_json=Path(args.output_json).expanduser().resolve(),
+            provider_override=args.provider,
+        )
+        print(result)
+        return 0
+    raise SystemExit(f"Unsupported command: {args.command}")
 
 
 if __name__ == "__main__":

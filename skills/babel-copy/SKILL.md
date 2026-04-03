@@ -103,7 +103,7 @@ Choose a document-level fallback font baseline from those preview renders before
 - visually classify the document body text as `serif` or `sans`
 - store that choice in top-level `font_baseline`
 - when visual inspection conflicts with weak native metadata or a non-embedded source font, visual inspection wins
-- use `uv run --script scripts/extract_document.py --font-baseline serif|sans` or `uv run --script scripts/run_babel_copy.py --font-baseline serif|sans` when you have already made the visual call
+- use `uv run --script scripts/extract_document.py --font-baseline serif|sans` when you have already made the visual call
 
 Baseline mapping:
 
@@ -159,38 +159,26 @@ Translate with context:
 - translate headers, footers, table headers, labels, captions, and body text
 - preserve consistent glossary choices across the entire document, not just one page
 
-Current translation fallback order for `uv run --script scripts/translate_blocks_codex.py`:
+Desktop translation flow for Codex Desktop or Claude Desktop:
 
-1. detect runtime mode and choose the matching CLI family:
-   - Codex mode: `codex exec`
-   - Claude mode: `claude` CLI with non-interactive print/exec flags
-2. matching API-key fallback from `.env` in the translation working directory:
-   - Codex mode: `OPENAI_API_KEY`
-   - Claude mode: `ANTHROPIC_API_KEY`
-3. matching inherited API key from the process environment
-4. Google Translate fallback
+1. run `uv run --script scripts/translate_blocks_codex.py prepare ... --output-json translation-requests.json`
+2. dispatch each request prompt to a desktop subagent in the active app
+3. collect the JSON-only subagent replies into `translation-responses.json`
+4. run `uv run --script scripts/translate_blocks_codex.py apply-responses ... --requests-json translation-requests.json --responses-json translation-responses.json --output-json translated_blocks.json`
 
-Extraction-time fragment merge in `uv run --script scripts/extract_document.py` should use the same Codex-or-Claude runtime-family selection, including explicit `--translation-provider` overrides and the same auto-detection rules when the provider stays on `auto`.
+Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
-Auth and fallback behavior:
-
-- before each CLI call, log the active translation runtime in a grep-friendly structured line
-- Codex mode logs the local Codex auth context; Claude mode logs the detected Claude CLI context
-- for `chatgpt` auth, log `auth_mode=chatgpt` and the active account email
-- for API-key auth, log only the last 4 characters of the key
-- also log whether a cwd `.env` exists and whether inherited `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` values are present
-- never log full API keys, tokens, or raw credential payloads
-- when fallback advances from one backend to the next, emit an explicit note in stderr/logs so automation can tell a temporary usage-limit retry from a terminal failure
-- if an API-key fallback returns an authentication failure, log which source failed: cwd `.env` or inherited environment
+1. run `uv run --script scripts/extract_document.py ... --fragment-merge-requests-json fragment-merge-requests.json`
+2. dispatch each fragment-merge prompt to a desktop subagent in the active app
+3. collect the JSON-only subagent replies into `fragment-merge-responses.json`
+4. rerun `uv run --script scripts/extract_document.py ... --fragment-merge-responses-json fragment-merge-responses.json`
 
 Resume and loop-safety expectations:
 
-- `uv run --script scripts/run_babel_copy.py` writes an `active-run.json` marker while a document job is still in flight
 - `scripts/run_optimization_cycle.py release` now refuses to release a cycle when active babel-copy workers are still running, unless explicitly forced
-- this prevents a temporary CLI or API usage-limit event from aborting the cycle while an OpenAI, Anthropic, or Google fallback translation is still progressing
 - if a run stops mid-cycle, the next automation pass should inspect existing attempt artifacts first and continue from the latest viable translated output instead of assuming the cycle is cleanly aborted
 
-When the document is complex, it is acceptable to delegate specific components or blocks to the active CLI translator or sub-agents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
+When the document is complex, it is acceptable to delegate specific components or blocks to desktop subagents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
 
 If no API or local MT backend is available or desired, use a manual phrase-map flow:
 
@@ -228,13 +216,6 @@ Current bundled rebuild path:
 - `uv run --script scripts/rebuild_typst.py`
 - `uv run --script scripts/export_typst_pdf.py`
 - `uv run --script scripts/build_final_pdf.py`
-- `uv run --script scripts/run_babel_copy.py`
-
-For automation loops, prefer calling `uv run --script scripts/run_babel_copy.py` with:
-
-- `--document-id`
-- `--cycle-id`
-- `--run-label`
 
 These fields are written into `run-manifest.json` so `babel-copy-qa` and `babel-copy-optimizer` can locate the originating run deterministically.
 
@@ -249,9 +230,8 @@ This now supports:
   - template-preserving overlay for branded native-text or scan-heavy pages
   - per-page structured rebuild fallback for form/table/signature pages inside the same document
   - translated repeated footers and headers as real translatable blocks
-- end-to-end runner:
-  - extract -> CLI/API translation -> hybrid final PDF build -> rendered comparison report -> check notes
-  - `--translation-provider auto|codex|claude|openai|anthropic|google` when you need to force one path
+- staged desktop translation:
+  - extract -> desktop prepare/apply translation -> hybrid final PDF build -> rendered comparison report -> check notes
 
 It is still not a fully page-faithful legal-document engine, but it now covers the high-leverage structure needed for form-heavy signature pages.
 
@@ -334,9 +314,8 @@ This skill now ships its own bundled scripts:
 - `scripts/rebuild_typst.py`: minimal `.typ` rebuild from translated blocks
 - `scripts/export_typst_pdf.py`: Typst CLI PDF export
 - `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
-- `scripts/run_babel_copy.py`: preferred non-API workflow runner for full jobs
 - `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
-- `scripts/translate_blocks_codex.py`: block translation through Codex, Claude Code, matching API fallbacks, or Google Translate
+- `scripts/translate_blocks_codex.py`: block translation request prep/apply for desktop subagents
 - each Python script includes inline uv metadata and should be invoked with `uv run --script`
 - each Python script is expected to ship with an adjacent `.lock` file
 

@@ -17,8 +17,6 @@ import argparse
 import json
 import os
 import re
-import subprocess
-import tempfile
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
@@ -28,9 +26,6 @@ import numpy as np
 from PIL import Image
 from translation_runtime import (
     TRANSLATION_PROVIDER_CHOICES,
-    anthropic_model_name,
-    claude_cli_flags,
-    codex_model_name,
     detect_runtime_mode,
     translation_provider,
 )
@@ -80,6 +75,14 @@ def parse_args() -> argparse.Namespace:
         "--font-baseline", help="Visual fallback font family override: serif or sans."
     )
     parser.add_argument("--translation-provider", choices=TRANSLATION_PROVIDER_CHOICES)
+    parser.add_argument(
+        "--fragment-merge-requests-json",
+        help="Optional path to write desktop-subagent fragment merge requests.",
+    )
+    parser.add_argument(
+        "--fragment-merge-responses-json",
+        help="Optional path to read desktop-subagent fragment merge responses.",
+    )
     return parser.parse_args()
 
 
@@ -1431,19 +1434,9 @@ def is_ambiguous_fragment_pair(previous: dict, current: dict) -> bool:
     return False
 
 
-def codex_fragment_merge_model() -> str | None:
+def fragment_merge_request_model() -> str | None:
     value = os.environ.get("BABEL_COPY_FRAGMENT_MERGE_MODEL", "").strip()
     return value or None
-
-
-def fragment_merge_model(runtime_mode: str) -> str | None:
-    explicit = codex_fragment_merge_model()
-    if explicit:
-        return explicit
-    if runtime_mode == "claude":
-        return anthropic_model_name(None)
-    model = codex_model_name(None)
-    return None if model == "default" else model
 
 
 def build_fragment_merge_prompt(candidates: list[dict]) -> str:
@@ -1483,7 +1476,7 @@ Pairs:
 def parse_fragment_merge_response(raw: str) -> dict[str, bool]:
     raw = raw.strip()
     if not raw:
-        raise ValueError("Empty codex response")
+        raise ValueError("Empty fragment merge response")
     if raw.startswith("```"):
         raw = raw.strip("`")
         if raw.startswith("json"):
@@ -1491,82 +1484,109 @@ def parse_fragment_merge_response(raw: str) -> dict[str, bool]:
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1:
-        raise ValueError("No JSON object found in codex response")
+        raise ValueError("No JSON object found in fragment merge response")
     payload = json.loads(raw[start : end + 1])
     decisions = payload.get("decisions", {})
     if not isinstance(decisions, dict):
-        raise ValueError("Unexpected codex response structure")
+        raise ValueError("Unexpected fragment merge response structure")
     parsed: dict[str, bool] = {}
     for key, value in decisions.items():
+        if isinstance(value, bool):
+            parsed[str(key)] = value
+            continue
         parsed[str(key)] = str(value).strip().lower() == "yes"
     return parsed
 
 
-def run_codex_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, bool]:
-    with tempfile.TemporaryDirectory(prefix="babel-copy-fragment-merge-") as tmp_raw:
-        tmp_dir = Path(tmp_raw)
-        output_file = tmp_dir / "last-message.txt"
-        cmd = [
-            "codex",
-            "exec",
-            "--skip-git-repo-check",
-            "-C",
-            str(cwd),
-            "--ephemeral",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-o",
-            str(output_file),
-            "-",
-        ]
-        model = fragment_merge_model("codex")
-        if model:
-            cmd.extend(["--model", model])
-        subprocess.run(
-            cmd, input=build_fragment_merge_prompt(candidates), text=True, check=True
+def build_fragment_merge_request(
+    candidates: list[dict],
+    *,
+    cwd: Path,
+    provider: str | None,
+) -> dict:
+    runtime_mode = detect_runtime_mode(translation_provider(provider))
+    request_id = f"page-{int(candidates[0]['page_number']):03d}-fragment-merge"
+    return {
+        "request_id": request_id,
+        "kind": "fragment_merge_page",
+        "page_number": int(candidates[0]["page_number"]),
+        "runtime_mode": runtime_mode,
+        "provider": translation_provider(provider),
+        "model": fragment_merge_request_model(),
+        "pair_ids": [str(candidate["pair_id"]) for candidate in candidates],
+        "pairs": [
+            {
+                "pair_id": str(candidate["pair_id"]),
+                "page_number": int(candidate["page_number"]),
+                "previous_role": str(candidate["previous_role"]),
+                "current_role": str(candidate["current_role"]),
+                "vertical_gap": float(candidate["vertical_gap"]),
+                "previous_text": str(candidate["previous_text"]),
+                "current_text": str(candidate["current_text"]),
+            }
+            for candidate in candidates
+        ],
+        "prompt": build_fragment_merge_prompt(candidates),
+        "response_shape": {
+            "decisions": {"pair_id": "yes or no"},
+        },
+        "dispatch_hint": (
+            "Send this prompt to a desktop subagent in the active Codex or Claude app. "
+            "Require a JSON-only reply that matches response_shape."
+        ),
+    }
+
+
+def parse_fragment_merge_response_entry(entry: dict) -> dict[str, bool]:
+    if isinstance(entry.get("decisions"), dict):
+        return parse_fragment_merge_response(
+            json.dumps({"decisions": entry["decisions"]}, ensure_ascii=False)
         )
-        return parse_fragment_merge_response(output_file.read_text())
+    for field in ("response_json", "response"):
+        if isinstance(entry.get(field), dict):
+            return parse_fragment_merge_response(
+                json.dumps(entry[field], ensure_ascii=False)
+            )
+    for field in ("response_text", "response"):
+        value = entry.get(field)
+        if isinstance(value, str):
+            return parse_fragment_merge_response(value)
+    raise ValueError(f"Unsupported fragment merge response entry: {entry}")
 
 
-def run_claude_fragment_merge(candidates: list[dict], cwd: Path) -> dict[str, bool]:
-    cmd = [
-        "claude",
-        *claude_cli_flags(),
-        "--dangerously-skip-permissions",
-        "--add-dir",
-        str(cwd),
-    ]
-    if "-p" in cmd or "--print" in cmd:
-        cmd.extend(["--tools", ""])
-    model = fragment_merge_model("claude")
-    if model:
-        cmd.extend(["--model", model])
-    completed = subprocess.run(
-        cmd,
-        input=build_fragment_merge_prompt(candidates),
-        text=True,
-        cwd=str(cwd),
-        capture_output=True,
-        check=True,
-    )
-    return parse_fragment_merge_response(completed.stdout)
+def load_fragment_merge_pair_decisions(path: Path | None) -> dict[str, bool]:
+    if path is None or not path.exists():
+        return {}
+    payload = json.loads(path.read_text())
+    if isinstance(payload, dict) and isinstance(payload.get("decisions"), dict):
+        return parse_fragment_merge_response(
+            json.dumps({"decisions": payload["decisions"]}, ensure_ascii=False)
+        )
+    responses = payload.get("responses") if isinstance(payload, dict) else payload
+    if isinstance(responses, list):
+        aggregated: dict[str, bool] = {}
+        for entry in responses:
+            if not isinstance(entry, dict):
+                continue
+            aggregated.update(parse_fragment_merge_response_entry(entry))
+        return aggregated
+    if isinstance(payload, dict):
+        aggregated = {}
+        for request_id, response in payload.items():
+            aggregated.update(
+                parse_fragment_merge_response_entry(
+                    {"request_id": request_id, "response": response}
+                )
+            )
+        return aggregated
+    raise SystemExit(f"Unsupported fragment merge response payload in {path}")
 
 
-def run_fragment_merge(
-    candidates: list[dict], *, cwd: Path, provider: str | None = None
-) -> dict[str, bool]:
-    runtime_mode = detect_runtime_mode(cwd, translation_provider(provider))
-    if runtime_mode == "claude":
-        return run_claude_fragment_merge(candidates, cwd=cwd)
-    return run_codex_fragment_merge(candidates, cwd=cwd)
-
-
-def llm_fragment_merge_decisions(
-    page_blocks: list[dict], cwd: Path, provider: str | None = None
-) -> set[tuple[str, str]]:
-    if not llm_fragment_merge_enabled():
-        return set()
+def collect_fragment_merge_candidates(
+    page_blocks: list[dict],
+) -> tuple[list[dict], set[tuple[str, str]], dict[str, tuple[str, str]]]:
     ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
-    decisions: set[tuple[str, str]] = set()
+    cached_yes_decisions: set[tuple[str, str]] = set()
     candidates: list[dict] = []
     candidate_keys: dict[str, tuple[str, str]] = {}
     for previous, current in zip(ordered, ordered[1:]):
@@ -1577,7 +1597,7 @@ def llm_fragment_merge_decisions(
         cache_key = fragment_merge_cache_key(previous, current)
         cached = _FRAGMENT_MERGE_LLM_CACHE.get(cache_key)
         if cached is True:
-            decisions.add((str(previous["id"]), str(current["id"])))
+            cached_yes_decisions.add((str(previous["id"]), str(current["id"])))
             continue
         if cached is False:
             continue
@@ -1597,18 +1617,44 @@ def llm_fragment_merge_decisions(
             }
         )
         candidate_keys[pair_id] = (str(previous["id"]), str(current["id"]))
+    return candidates, cached_yes_decisions, candidate_keys
+
+
+def llm_fragment_merge_decisions(
+    page_blocks: list[dict],
+    cwd: Path,
+    provider: str | None = None,
+    provided_pair_decisions: dict[str, bool] | None = None,
+) -> tuple[set[tuple[str, str]], list[dict]]:
+    if not llm_fragment_merge_enabled():
+        return set(), []
+    provided_pair_decisions = provided_pair_decisions or {}
+    candidates, decisions, candidate_keys = collect_fragment_merge_candidates(page_blocks)
     if not candidates:
-        return decisions
-    try:
-        raw_decisions = run_fragment_merge(candidates, cwd=cwd, provider=provider)
-    except Exception:
-        raw_decisions = {}
+        return decisions, []
+    unresolved_candidates: list[dict] = []
+    raw_decisions: dict[str, bool] = {}
+    for candidate in candidates:
+        pair_id = candidate["pair_id"]
+        if pair_id in provided_pair_decisions:
+            raw_decisions[pair_id] = bool(provided_pair_decisions[pair_id])
+        else:
+            unresolved_candidates.append(candidate)
     for candidate in candidates:
         result = bool(raw_decisions.get(candidate["pair_id"], False))
         _FRAGMENT_MERGE_LLM_CACHE[candidate["cache_key"]] = result
         if result:
             decisions.add(candidate_keys[candidate["pair_id"]])
-    return decisions
+    requests = []
+    if unresolved_candidates:
+        requests.append(
+            build_fragment_merge_request(
+                unresolved_candidates,
+                cwd=cwd,
+                provider=provider,
+            )
+        )
+    return decisions, requests
 
 
 def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
@@ -2048,15 +2094,29 @@ def main() -> int:
     output_dir = Path(args.output_dir).expanduser().resolve()
     assets_dir = output_dir / "assets"
     renders_dir = output_dir / "page-renders"
+    fragment_merge_requests_path = (
+        Path(args.fragment_merge_requests_json).expanduser().resolve()
+        if args.fragment_merge_requests_json
+        else None
+    )
+    fragment_merge_responses_path = (
+        Path(args.fragment_merge_responses_json).expanduser().resolve()
+        if args.fragment_merge_responses_json
+        else None
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
     renders_dir.mkdir(parents=True, exist_ok=True)
 
     doc = fitz.open(input_pdf)
     selected = parse_page_selection(args.pages, doc.page_count)
+    provided_fragment_merge_decisions = load_fragment_merge_pair_decisions(
+        fragment_merge_responses_path
+    )
     all_blocks = []
     all_assets = []
     pages_payload = []
+    fragment_merge_requests = []
     markdown_lines = [f"# Source Text: {input_pdf.name}", ""]
 
     for page_index in range(doc.page_count):
@@ -2151,13 +2211,18 @@ def main() -> int:
         )
         page_blocks = attach_leading_bullets(page_blocks)
         page_blocks = merge_inline_row_fragments(page_blocks)
-        page_blocks = merge_paragraph_fragments(
-            page_blocks,
+        fragment_merge_pairs, page_fragment_merge_requests = (
             llm_fragment_merge_decisions(
                 page_blocks,
                 cwd=input_pdf.parent,
                 provider=args.translation_provider,
-            ),
+                provided_pair_decisions=provided_fragment_merge_decisions,
+            )
+        )
+        fragment_merge_requests.extend(page_fragment_merge_requests)
+        page_blocks = merge_paragraph_fragments(
+            page_blocks,
+            fragment_merge_pairs,
         )
         page_blocks = dedupe_ocr_blocks(page_blocks)
         mark_textual_table_like_rows(page_blocks)
@@ -2236,12 +2301,37 @@ def main() -> int:
         "blocks": all_blocks,
         "assets": all_assets,
     }
+    if fragment_merge_requests_path is not None:
+        runtime_mode = detect_runtime_mode(
+            translation_provider(args.translation_provider),
+        )
+        fragment_merge_request_payload = {
+            "schema_version": "1.0",
+            "kind": "babel_copy_fragment_merge_requests",
+            "input_pdf": str(input_pdf),
+            "provider": translation_provider(args.translation_provider),
+            "runtime_mode": runtime_mode,
+            "request_count": len(fragment_merge_requests),
+            "requests": fragment_merge_requests,
+        }
+        fragment_merge_requests_path.parent.mkdir(parents=True, exist_ok=True)
+        fragment_merge_requests_path.write_text(
+            json.dumps(fragment_merge_request_payload, indent=2, ensure_ascii=False)
+        )
+        payload["fragment_merge_requests_json"] = str(fragment_merge_requests_path)
+        payload["fragment_merge_request_count"] = len(fragment_merge_requests)
+        payload["fragment_merge_runtime_mode"] = runtime_mode
+    if fragment_merge_responses_path is not None:
+        payload["fragment_merge_responses_json"] = str(fragment_merge_responses_path)
+        payload["fragment_merge_decision_count"] = len(provided_fragment_merge_decisions)
     (output_dir / "source.md").write_text("\n".join(markdown_lines))
     (output_dir / "blocks.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False)
     )
     print(output_dir / "source.md")
     print(output_dir / "blocks.json")
+    if fragment_merge_requests_path is not None:
+        print(fragment_merge_requests_path)
     print(assets_dir)
     return 0
 

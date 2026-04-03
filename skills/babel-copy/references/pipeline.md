@@ -96,7 +96,6 @@ Rebuild from structure, not from scan pixels. Match:
 Current shipped implementation:
 
 - `scripts/build_final_pdf.py`
-- `scripts/run_babel_copy.py`
 - `scripts/rebuild_typst.py`
 - `scripts/export_typst_pdf.py`
 

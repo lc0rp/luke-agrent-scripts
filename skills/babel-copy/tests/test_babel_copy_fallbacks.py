@@ -23,16 +23,6 @@ def load_module(
     if stub_modules:
         for name, module in stub_modules.items():
             sys.modules.setdefault(name, module)
-    if "openai" not in sys.modules:
-        fake_openai = types.ModuleType("openai")
-
-        class DummyOpenAI:  # pragma: no cover - tests always patch live usage
-            def __init__(self, *args, **kwargs):
-                self.args = args
-                self.kwargs = kwargs
-
-        fake_openai.OpenAI = DummyOpenAI
-        sys.modules["openai"] = fake_openai
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -48,10 +38,6 @@ TRANSLATION_RUNTIME = load_module(
 TRANSLATE_BLOCKS_CODEX = load_module(
     "test_translate_blocks_codex",
     REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_codex.py",
-)
-RUN_BABEL_COPY = load_module(
-    "test_run_babel_copy",
-    REPO_ROOT / "skills" / "babel-copy" / "scripts" / "run_babel_copy.py",
 )
 RUN_OPTIMIZATION_CYCLE = load_module(
     "test_run_optimization_cycle",
@@ -122,200 +108,169 @@ EXTRACT_DOCUMENT = load_module(
 
 
 class TranslateBlocksCodexTests(unittest.TestCase):
-    def test_resolve_openai_api_candidates_prefers_dotenv_then_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("OPENAI_API_KEY=dotenv-key-12345678901234567890\n")
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "env-key-12345678901234567890"}, clear=False):
-                candidates = TRANSLATE_BLOCKS_CODEX.resolve_openai_api_candidates(cwd)
+    def test_translation_provider_choices_are_desktop_only(self) -> None:
         self.assertEqual(
-            [entry["source"] for entry in candidates],
-            ["dotenv_openai_api_key", "env_openai_api_key"],
+            TRANSLATION_RUNTIME.TRANSLATION_PROVIDER_CHOICES,
+            ("auto", "codex", "claude"),
         )
-
-    def test_resolve_anthropic_api_candidates_prefers_dotenv_then_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("ANTHROPIC_API_KEY=dotenv-key-12345678901234567890\n")
-            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "env-key-12345678901234567890"}, clear=False):
-                candidates = TRANSLATE_BLOCKS_CODEX.resolve_anthropic_api_candidates(cwd)
-        self.assertEqual(
-            [entry["source"] for entry in candidates],
-            ["dotenv_anthropic_api_key", "env_anthropic_api_key"],
-        )
-
-    def test_try_openai_fallback_skips_invalid_dotenv_and_uses_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("OPENAI_API_KEY=xxxxxx\n")
-            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "env-key-12345678901234567890"}, clear=False):
-                with mock.patch.object(
-                    TRANSLATE_BLOCKS_CODEX,
-                    "run_openai",
-                    return_value={"block-1": "translated"},
-                ) as run_openai:
-                    result = TRANSLATE_BLOCKS_CODEX.try_openai_fallback(
-                        "prompt",
-                        cwd=cwd,
-                        model="gpt-5.4-mini",
-                        batch_index=1,
-                        total_batches=1,
-                    )
-        self.assertEqual(result, ({"block-1": "translated"}, "env_openai_api_key"))
-        run_openai.assert_called_once()
-        self.assertEqual(run_openai.call_args.kwargs["api_key"], "env-key-12345678901234567890")
-
-    def test_try_anthropic_fallback_skips_invalid_dotenv_and_uses_env(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("ANTHROPIC_API_KEY=xxxxxx\n")
-            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "env-key-12345678901234567890"}, clear=False):
-                with mock.patch.object(
-                    TRANSLATE_BLOCKS_CODEX,
-                    "run_anthropic",
-                    return_value={"block-1": "translated"},
-                ) as run_anthropic:
-                    result = TRANSLATE_BLOCKS_CODEX.try_anthropic_fallback(
-                        "prompt",
-                        cwd=cwd,
-                        model="claude-sonnet-4-20250514",
-                        batch_index=1,
-                        total_batches=1,
-                    )
-        self.assertEqual(result, ({"block-1": "translated"}, "env_anthropic_api_key"))
-        run_anthropic.assert_called_once()
-        self.assertEqual(run_anthropic.call_args.kwargs["api_key"], "env-key-12345678901234567890")
 
     def test_detect_runtime_mode_prefers_explicit_claude_override(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            with mock.patch.dict(os.environ, {"BABEL_COPY_RUNTIME_MODE": "claude"}, clear=False):
-                mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode(cwd, "auto")
+        with mock.patch.dict(os.environ, {"BABEL_COPY_RUNTIME_MODE": "claude"}, clear=False):
+            mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode("auto")
         self.assertEqual(mode, "claude")
 
-    def test_detect_runtime_mode_prefers_anthropic_only_credentials(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_raw:
-            cwd = Path(tmp_raw)
-            (cwd / ".env").write_text("ANTHROPIC_API_KEY=dotenv-key-12345678901234567890\n")
-            with (
-                mock.patch.dict(os.environ, {}, clear=True),
-                mock.patch.object(TRANSLATION_RUNTIME.shutil, "which", side_effect=lambda name: "/usr/bin/" + name),
-            ):
-                mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode(cwd, "auto")
-        self.assertEqual(mode, "claude")
+    def test_detect_runtime_mode_defaults_to_codex(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            mode = TRANSLATE_BLOCKS_CODEX.detect_runtime_mode("auto")
+        self.assertEqual(mode, "codex")
 
-    def test_run_claude_uses_print_mode_by_default(self) -> None:
-        completed = subprocess_completed('{"translations":{"block-1":"translated"}}')
-        with (
-            mock.patch.object(TRANSLATE_BLOCKS_CODEX.shutil, "which", return_value="/opt/homebrew/bin/claude"),
-            mock.patch.object(TRANSLATE_BLOCKS_CODEX, "log_claude_auth_context", return_value={"auth_path": "claude_code_cli"}),
-            mock.patch.object(TRANSLATE_BLOCKS_CODEX.subprocess, "run", return_value=completed) as run_subprocess,
-        ):
-            translations, context = TRANSLATE_BLOCKS_CODEX.run_claude("prompt", Path("/tmp/work"), None)
-        self.assertEqual(translations, {"block-1": "translated"})
-        self.assertEqual(context["auth_path"], "claude_code_cli")
-        cmd = run_subprocess.call_args.args[0]
-        self.assertIn("-p", cmd)
-        self.assertIn("--output-format", cmd)
-        self.assertIn("--tools", cmd)
-        self.assertEqual(run_subprocess.call_args.kwargs["cwd"], "/tmp/work")
+    def test_prepare_request_payload_writes_desktop_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            blocks_json = workspace / "blocks.json"
+            requests_json = workspace / "translation-requests.json"
+            blocks_json.write_text(
+                json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                            },
+                            {
+                                "id": "block-2",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Merci",
+                            },
+                        ]
+                    }
+                )
+            )
+            result = TRANSLATE_BLOCKS_CODEX.prepare_request_payload(
+                blocks_json=blocks_json,
+                output_json=requests_json,
+                source_lang="French",
+                target_lang="English",
+                batch_size=1,
+                provider="claude",
+                model="claude-sonnet-4-20250514",
+            )
+            self.assertEqual(result, requests_json)
+            payload = json.loads(requests_json.read_text())
+        self.assertEqual(payload["kind"], "babel_copy_translation_requests")
+        self.assertEqual(payload["request_count"], 2)
+        self.assertEqual(payload["runtime_mode"], "claude")
+        self.assertEqual(payload["requests"][0]["block_ids"], ["block-1"])
+        self.assertIn("Translate the following document blocks", payload["requests"][0]["prompt"])
+
+    def test_apply_response_payload_builds_translated_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            blocks_json = workspace / "blocks.json"
+            requests_json = workspace / "translation-requests.json"
+            responses_json = workspace / "translation-responses.json"
+            output_json = workspace / "translated_blocks.json"
+            blocks_json.write_text(
+                json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                            }
+                        ]
+                    }
+                )
+            )
+            requests_json.write_text(
+                json.dumps(
+                    {
+                        "runtime_mode": "claude",
+                        "provider": "claude",
+                        "requests": [{"request_id": "batch-001"}],
+                    }
+                )
+            )
+            responses_json.write_text(
+                json.dumps(
+                    {
+                        "responses": [
+                            {
+                                "request_id": "batch-001",
+                                "response_text": '{"translations":{"block-1":"Hello"}}',
+                            }
+                        ]
+                    }
+                )
+            )
+            result = TRANSLATE_BLOCKS_CODEX.apply_response_payload(
+                blocks_json=blocks_json,
+                requests_json=requests_json,
+                responses_json=responses_json,
+                output_json=output_json,
+                provider_override=None,
+            )
+            self.assertEqual(result, output_json)
+            payload = json.loads(output_json.read_text())
+        self.assertEqual(payload["blocks"][0]["translated_text"], "Hello")
+        self.assertEqual(payload["translation_mode"], "desktop_subagent")
+        self.assertEqual(payload["translation_backend_used"], "claude_desktop_subagent")
 
 
 class ExtractDocumentTests(unittest.TestCase):
-    def test_run_fragment_merge_dispatches_to_claude_runtime(self) -> None:
-        candidates = [{"pair_id": "p1->p2"}]
-        with (
-            mock.patch.object(EXTRACT_DOCUMENT, "translation_provider", return_value="auto"),
-            mock.patch.object(EXTRACT_DOCUMENT, "detect_runtime_mode", return_value="claude"),
-            mock.patch.object(
-                EXTRACT_DOCUMENT,
-                "run_claude_fragment_merge",
-                return_value={"p1->p2": True},
-            ) as run_claude,
-            mock.patch.object(EXTRACT_DOCUMENT, "run_codex_fragment_merge") as run_codex,
+    def test_llm_fragment_merge_returns_desktop_request_when_unresolved(self) -> None:
+        candidates = [
+            {
+                "pair_id": "p1-b1->p1-b2",
+                "page_number": 1,
+                "previous_role": "paragraph",
+                "current_role": "paragraph",
+                "vertical_gap": 4.0,
+                "previous_text": "Bonjour",
+                "current_text": "le monde",
+                "cache_key": "cache-1",
+            }
+        ]
+        with mock.patch.object(
+            EXTRACT_DOCUMENT,
+            "collect_fragment_merge_candidates",
+            return_value=(candidates, set(), {"p1-b1->p1-b2": ("p1-b1", "p1-b2")}),
         ):
-            decisions = EXTRACT_DOCUMENT.run_fragment_merge(
-                candidates,
+            decisions, requests = EXTRACT_DOCUMENT.llm_fragment_merge_decisions(
+                [{"id": "unused"}],
                 cwd=Path("/tmp/work"),
-                provider="auto",
+                provider="claude",
+                provided_pair_decisions={},
             )
-        self.assertEqual(decisions, {"p1->p2": True})
-        run_claude.assert_called_once_with(candidates, cwd=Path("/tmp/work"))
-        run_codex.assert_not_called()
+        self.assertEqual(decisions, set())
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["runtime_mode"], "claude")
+        self.assertEqual(requests[0]["pair_ids"], ["p1-b1->p1-b2"])
 
-
-class RunBabelCopyTests(unittest.TestCase):
-    def test_main_passes_translation_provider_to_extract_and_translate_steps(self) -> None:
+    def test_load_fragment_merge_pair_decisions_accepts_response_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
-            workspace = Path(tmp_raw)
-            input_pdf = workspace / "sample.pdf"
-            input_pdf.write_bytes(b"%PDF-1.4\n")
-            output_dir = workspace / "out"
-            commands: list[list[str]] = []
-
-            def fake_run_step(cmd: list[str]) -> None:
-                commands.append(cmd)
-                if cmd[3].endswith("extract_document.py"):
-                    extract_dir = output_dir / "extracted"
-                    extract_dir.mkdir(parents=True, exist_ok=True)
-                    (extract_dir / "blocks.json").write_text(
-                        json.dumps(
+            responses_json = Path(tmp_raw) / "fragment-merge-responses.json"
+            responses_json.write_text(
+                json.dumps(
+                    {
+                        "responses": [
                             {
-                                "page_count": 1,
-                                "pages": [],
-                                "blocks": [],
-                                "font_baseline": {},
+                                "request_id": "page-001-fragment-merge",
+                                "response_text": '{"decisions":{"p1-b1->p1-b2":"yes"}}',
                             }
-                        )
-                    )
-
-            with (
-                mock.patch.object(RUN_BABEL_COPY, "run_step", side_effect=fake_run_step),
-                mock.patch.object(
-                    RUN_BABEL_COPY,
-                    "resolve_uv_executable",
-                    return_value="/opt/custom/uv",
-                ),
-            ):
-                with mock.patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "run_babel_copy.py",
-                        str(input_pdf),
-                        "--output-dir",
-                        str(output_dir),
-                        "--translation-provider",
-                        "claude",
-                        "--skip-compare",
-                    ],
-                ):
-                    exit_code = RUN_BABEL_COPY.main()
-
-        self.assertEqual(exit_code, 0)
-        self.assertGreaterEqual(len(commands), 3)
-        extract_cmd = commands[0]
-        translate_cmd = commands[1]
-        self.assertEqual(
-            extract_cmd[:3],
-            ["/opt/custom/uv", "run", "--script"],
-        )
-        self.assertEqual(
-            translate_cmd[:3],
-            ["/opt/custom/uv", "run", "--script"],
-        )
-        self.assertTrue(extract_cmd[3].endswith("extract_document.py"))
-        self.assertTrue(translate_cmd[3].endswith("translate_blocks_codex.py"))
-        self.assertEqual(
-            extract_cmd[extract_cmd.index("--translation-provider") + 1], "claude"
-        )
-        self.assertEqual(
-            translate_cmd[translate_cmd.index("--provider") + 1], "claude"
-        )
-
-
-def subprocess_completed(stdout: str):
-    return mock.Mock(stdout=stdout, stderr="", returncode=0)
+                        ]
+                    }
+                )
+            )
+            decisions = EXTRACT_DOCUMENT.load_fragment_merge_pair_decisions(
+                responses_json
+            )
+        self.assertEqual(decisions, {"p1-b1->p1-b2": True})
 
 
 class ReleaseGuardTests(unittest.TestCase):
