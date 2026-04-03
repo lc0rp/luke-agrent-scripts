@@ -129,14 +129,38 @@ def translated_blocks_cache_path(blocks_json: Path) -> Path:
     return blocks_json.parent / "translated_blocks.json"
 
 
+def translation_cache_scope_matches(
+    payload: dict[str, Any],
+    *,
+    source_lang: str,
+    target_lang: str,
+) -> bool:
+    cached_source_lang = str(payload.get("translation_source_lang", "")).strip()
+    cached_target_lang = str(payload.get("translation_target_lang", "")).strip()
+    if not cached_source_lang or not cached_target_lang:
+        return False
+    return (
+        cached_source_lang == source_lang.strip()
+        and cached_target_lang == target_lang.strip()
+    )
+
+
 def cached_translations_for_blocks(
     blocks: list[dict[str, Any]],
     *,
     translated_blocks_path: Path,
+    source_lang: str,
+    target_lang: str,
 ) -> dict[str, str]:
     if not translated_blocks_path.exists():
         return {}
     payload = json.loads(translated_blocks_path.read_text())
+    if not translation_cache_scope_matches(
+        payload,
+        source_lang=source_lang,
+        target_lang=target_lang,
+    ):
+        return {}
     previous_blocks = {
         str(block.get("id", "")): block
         for block in payload.get("blocks", [])
@@ -318,6 +342,8 @@ def prepare_request_payload(
         cached_translations = cached_translations_for_blocks(
             blocks,
             translated_blocks_path=translated_blocks_cache_path(blocks_json),
+            source_lang=source_lang,
+            target_lang=target_lang,
         )
         pending_blocks = [
             block for block in blocks if str(block["id"]) not in cached_translations
@@ -436,6 +462,8 @@ def apply_translations_to_payload(
     translations: dict[str, str],
     provider: str,
     runtime_mode: str,
+    source_lang: str,
+    target_lang: str,
 ) -> dict[str, Any]:
     missing = []
     for block in payload.get("blocks", []):
@@ -460,6 +488,8 @@ def apply_translations_to_payload(
     payload["translation_backends_used"] = [backend]
     payload["runtime_mode"] = runtime_mode
     payload["translation_provider"] = provider
+    payload["translation_source_lang"] = source_lang
+    payload["translation_target_lang"] = target_lang
     return payload
 
 
@@ -516,12 +546,16 @@ def apply_response_payload(
         ).strip()
         or "codex"
     )
+    source_lang = str(request_payload.get("source_lang", "")).strip()
+    target_lang = str(request_payload.get("target_lang", "")).strip()
     with profiler.stage("apply_translations") if profiler else nullcontext():
         final_payload = apply_translations_to_payload(
             payload,
             translations=translations,
             provider=provider,
             runtime_mode=runtime_mode,
+            source_lang=source_lang,
+            target_lang=target_lang,
         )
     if profiler:
         profiler.set_counter("request_count", len(request_ids))

@@ -271,6 +271,8 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             translated_json.write_text(
                 json.dumps(
                     {
+                        "translation_source_lang": "French",
+                        "translation_target_lang": "English",
                         "blocks": [
                             {
                                 "id": "block-1",
@@ -310,6 +312,63 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(payload["request_count"], 1)
         self.assertEqual(payload["requests"][0]["block_ids"], ["block-2"])
 
+    def test_prepare_request_payload_does_not_reuse_cached_translations_for_other_target_lang(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            blocks_json = workspace / "blocks.json"
+            requests_json = workspace / "translation-requests.json"
+            translated_json = workspace / "translated_blocks.json"
+            blocks_json.write_text(
+                json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                                "fingerprint": "same-1",
+                            }
+                        ]
+                    }
+                )
+            )
+            translated_json.write_text(
+                json.dumps(
+                    {
+                        "translation_source_lang": "French",
+                        "translation_target_lang": "English",
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                                "fingerprint": "same-1",
+                                "translated_text": "Hello",
+                            }
+                        ],
+                    }
+                )
+            )
+
+            TRANSLATE_BLOCKS_DESKTOP.prepare_request_payload(
+                blocks_json=blocks_json,
+                output_json=requests_json,
+                source_lang="French",
+                target_lang="German",
+                batch_size=10,
+                batch_char_budget=1000,
+                provider="claude",
+                model=None,
+            )
+            payload = json.loads(requests_json.read_text())
+
+        self.assertEqual(payload["cached_translation_count"], 0)
+        self.assertEqual(payload["cached_translations"], {})
+        self.assertEqual(payload["request_count"], 1)
+        self.assertEqual(payload["requests"][0]["block_ids"], ["block-1"])
+
     def test_apply_response_payload_builds_translated_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             workspace = Path(tmp_raw)
@@ -334,6 +393,8 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             requests_json.write_text(
                 json.dumps(
                     {
+                        "source_lang": "French",
+                        "target_lang": "English",
                         "runtime_mode": "claude",
                         "provider": "claude",
                         "requests": [{"request_id": "batch-001"}],
@@ -362,10 +423,10 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             self.assertEqual(result, output_json)
             payload = json.loads(output_json.read_text())
         self.assertEqual(payload["blocks"][0]["translated_text"], "Hello")
-
-
         self.assertEqual(payload["translation_mode"], "desktop_subagent")
         self.assertEqual(payload["translation_backend_used"], "claude_desktop_subagent")
+        self.assertEqual(payload["translation_source_lang"], "French")
+        self.assertEqual(payload["translation_target_lang"], "English")
 
 
 class ExtractDocumentTableHeuristicsTests(unittest.TestCase):
