@@ -15,9 +15,6 @@ import argparse
 from contextlib import nullcontext
 import difflib
 import json
-import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -25,7 +22,9 @@ import fitz
 
 from block_overrides import apply_custom_overrides_to_payload
 import core
+import export_typst_pdf
 from profiling import create_profiler, resolve_profile_path
+import rebuild_typst
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,34 +36,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiler-commands")
     parser.add_argument("--profiler-output-dir")
     return parser.parse_args()
-
-
-def resolve_uv_executable() -> str:
-    candidates = []
-    env_value = str(os.environ.get("UV_BIN") or "").strip()
-    if env_value:
-        candidates.append(env_value)
-    candidates.append(str(Path.home() / ".local" / "bin" / "uv"))
-    which_value = shutil.which("uv")
-    if which_value:
-        candidates.append(which_value)
-    for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return candidate
-    raise SystemExit(
-        "Missing dependency: uv. Install it first, then run babel-copy scripts with `uv run --script`."
-    )
-
-
-def uv_script_command(script_path: Path, *args: str) -> list[str]:
-    return [
-        resolve_uv_executable(),
-        "run",
-        "--script",
-        str(script_path),
-        *args,
-    ]
-
 
 def asset_map(payload: dict) -> dict[str, dict]:
     return {asset["id"]: asset for asset in payload.get("assets", [])}
@@ -277,48 +248,83 @@ def should_ignore_artifact_obstacle(block: dict) -> bool:
     return width * height <= 4.0 and len(text) <= 1
 
 
-def filtered_payload_for_page(payload: dict, page_number: int, assets_by_id: dict[str, dict]) -> dict:
-    page = next(page for page in payload.get("pages", []) if int(page["page_number"]) == page_number)
-    blocks = [block for block in payload.get("blocks", []) if int(block["page_number"]) == page_number]
-    asset_ids = set(page.get("asset_ids", []))
-    for block in blocks:
-        table = block.get("table")
-        if not table:
-            continue
-        cell_id = table.get("cell_id")
-        if not cell_id:
-            continue
-        for table_payload in page.get("tables", []):
-            for cell in table_payload.get("cells", []):
-                if cell.get("id") == cell_id:
-                    asset_ids.update(cell.get("signature_asset_ids", []))
-    assets = [assets_by_id[asset_id] for asset_id in asset_ids if asset_id in assets_by_id]
-    filtered_page = dict(page)
-    filtered_page["page_number"] = 1
-    filtered_page["asset_ids"] = [asset["id"] for asset in assets]
-    filtered_page["tables"] = json.loads(json.dumps(filtered_page.get("tables", [])))
-    for table in filtered_page.get("tables", []):
-        table["page_number"] = 1
+def filtered_payload_for_pages(payload: dict, page_numbers: list[int], assets_by_id: dict[str, dict]) -> dict:
+    ordered_page_numbers = [int(page_number) for page_number in page_numbers]
+    page_number_map = {page_number: index + 1 for index, page_number in enumerate(ordered_page_numbers)}
+    selected_pages = [
+        page
+        for page in payload.get("pages", [])
+        if int(page["page_number"]) in page_number_map
+    ]
+    filtered_pages = []
     filtered_blocks = []
-    for block in blocks:
-        copied = json.loads(json.dumps(block))
-        copied["page_number"] = 1
-        filtered_blocks.append(copied)
+    selected_asset_ids: set[str] = set()
+    for page in selected_pages:
+        original_page_number = int(page["page_number"])
+        mapped_page_number = page_number_map[original_page_number]
+        page_blocks = [
+            block
+            for block in payload.get("blocks", [])
+            if int(block["page_number"]) == original_page_number
+        ]
+        asset_ids = set(page.get("asset_ids", []))
+        for block in page_blocks:
+            table = block.get("table")
+            if not table:
+                continue
+            cell_id = table.get("cell_id")
+            if not cell_id:
+                continue
+            for table_payload in page.get("tables", []):
+                for cell in table_payload.get("cells", []):
+                    if cell.get("id") == cell_id:
+                        asset_ids.update(cell.get("signature_asset_ids", []))
+        selected_asset_ids.update(asset_ids)
+        filtered_page = json.loads(json.dumps(page))
+        filtered_page["page_number"] = mapped_page_number
+        ordered_asset_ids = [asset_id for asset_id in page.get("asset_ids", []) if asset_id in asset_ids]
+        ordered_asset_ids.extend(sorted(asset_ids - set(ordered_asset_ids)))
+        filtered_page["asset_ids"] = ordered_asset_ids
+        for table in filtered_page.get("tables", []):
+            table["page_number"] = mapped_page_number
+        filtered_pages.append(filtered_page)
+        for block in page_blocks:
+            copied = json.loads(json.dumps(block))
+            copied["page_number"] = mapped_page_number
+            filtered_blocks.append(copied)
     filtered_assets = []
-    for asset in assets:
+    for asset in payload.get("assets", []):
+        if asset["id"] not in selected_asset_ids:
+            continue
         copied = json.loads(json.dumps(asset))
-        copied["page_number"] = 1
+        copied["page_number"] = page_number_map[int(asset["page_number"])]
         filtered_assets.append(copied)
     return {
         "input_pdf": payload.get("input_pdf"),
-        "page_count": 1,
+        "page_count": len(filtered_pages),
         "block_count": len(filtered_blocks),
         "font_baseline": payload.get("font_baseline"),
-        "pages": [filtered_page],
+        "pages": filtered_pages,
         "blocks": filtered_blocks,
         "assets": filtered_assets,
         "translation_mode": payload.get("translation_mode"),
     }
+
+
+def contiguous_rebuild_chunks(pages: list[dict], assets_by_id: dict[str, dict]) -> list[list[int]]:
+    chunks: list[list[int]] = []
+    current_chunk: list[int] = []
+    for page in pages:
+        page_number = int(page["page_number"])
+        if choose_page_mode(page, assets_by_id) == "structured_rebuild":
+            current_chunk.append(page_number)
+            continue
+        if current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = []
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
 
 
 def render_overlay_page(
@@ -505,9 +511,9 @@ def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.
     return fitz.Rect(rect.x0, rect.y0, round(next_x0, 2), rect.y1)
 
 
-def render_page_via_typst(
+def render_pages_via_typst(
     payload: dict,
-    page_number: int,
+    page_numbers: list[int],
     output_pdf: Path,
     assets_by_id: dict[str, dict],
     source_doc: fitz.Document,
@@ -517,42 +523,43 @@ def render_page_via_typst(
     temp_dir: Path,
     profiler=None,
 ) -> Path:
-    script_dir = Path(__file__).resolve().parent
-    with profiler.stage("filter_page_payload", page_number=page_number) if profiler else nullcontext():
-        page_payload = filtered_payload_for_page(payload, page_number, assets_by_id)
+    chunk_label = f"{page_numbers[0]:03d}-{page_numbers[-1]:03d}"
+    with profiler.stage(
+        "filter_rebuild_chunk_payload",
+        page_start=page_numbers[0],
+        page_end=page_numbers[-1],
+        page_count=len(page_numbers),
+    ) if profiler else nullcontext():
+        page_payload = filtered_payload_for_pages(payload, page_numbers, assets_by_id)
     default_text_font = str(font_baseline.get("text_font_name") or core.TEXT_SERIF_FONT_NAME)
     for block in page_payload.get("blocks", []):
         style = block.setdefault("style", {})
         if not font_resource_is_usable(source_doc, font_catalog, style.get("font_name"), font_usability_cache, temp_dir):
             style["font_name"] = default_text_font
-    with tempfile.TemporaryDirectory(prefix="babel-copy-build-page-") as tmp_dir_raw:
+    with tempfile.TemporaryDirectory(prefix="babel-copy-build-chunk-") as tmp_dir_raw:
         tmp_dir = Path(tmp_dir_raw)
-        typ_path = tmp_dir / f"page-{page_number:03d}.typ"
-        page_json = tmp_dir / f"page-{page_number:03d}.json"
-        with profiler.stage("write_page_payload_json", page_number=page_number) if profiler else nullcontext():
-            page_json.write_text(json.dumps(page_payload, indent=2, ensure_ascii=False))
-        with profiler.stage("rebuild_typst_subprocess", page_number=page_number) if profiler else nullcontext():
-            subprocess.run(
-                uv_script_command(
-                    Path(script_dir / "rebuild_typst.py"),
-                    str(page_json),
-                    "--output-typ",
-                    str(typ_path),
-                ),
-                check=True,
-            )
+        typ_path = tmp_dir / f"pages-{chunk_label}.typ"
+        with profiler.stage(
+            "rebuild_typst_document",
+            page_start=page_numbers[0],
+            page_end=page_numbers[-1],
+            page_count=len(page_numbers),
+        ) if profiler else nullcontext():
+            rebuild_typst.write_typst_document(page_payload, typ_path)
         rendered_pdf = tmp_dir / f"{typ_path.stem}.pdf"
-        with profiler.stage("export_typst_pdf_subprocess", page_number=page_number) if profiler else nullcontext():
-            subprocess.run(
-                uv_script_command(
-                    Path(script_dir / "export_typst_pdf.py"),
-                    str(typ_path),
-                    "--output-pdf",
-                    str(rendered_pdf),
-                ),
-                check=True,
-            )
-        with profiler.stage("copy_rendered_page_pdf", page_number=page_number) if profiler else nullcontext():
+        with profiler.stage(
+            "compile_typst_pdf",
+            page_start=page_numbers[0],
+            page_end=page_numbers[-1],
+            page_count=len(page_numbers),
+        ) if profiler else nullcontext():
+            export_typst_pdf.compile_typst_to_pdf(typ_path, rendered_pdf)
+        with profiler.stage(
+            "copy_rendered_chunk_pdf",
+            page_start=page_numbers[0],
+            page_end=page_numbers[-1],
+            page_count=len(page_numbers),
+        ) if profiler else nullcontext():
             output_pdf.parent.mkdir(parents=True, exist_ok=True)
             output_pdf.write_bytes(rendered_pdf.read_bytes())
     return output_pdf
@@ -569,33 +576,56 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
     font_cache: dict[str, tuple[str, str | None]] = {}
     font_usability_cache: dict[str, bool] = {}
     font_baseline = core.font_baseline_from_payload(payload)
+    pages = payload.get("pages", [])
     try:
         with tempfile.TemporaryDirectory(prefix="babel-copy-fonts-") as font_dir_raw:
             font_dir = Path(font_dir_raw)
-            for page_index, page in enumerate(payload.get("pages", [])):
+            page_index = 0
+            while page_index < len(pages):
+                page = pages[page_index]
                 page_number = int(page["page_number"])
                 mode = choose_page_mode(page, assets_by_id)
                 page_blocks = blocks.get(page_number, [])
-                with profiler.stage(
-                    "render_page",
-                    page_number=page_number,
-                    mode=mode,
-                    block_count=len(page_blocks),
-                    table_count=len(page.get("tables", [])),
-                ) if profiler else nullcontext() as page_span:
-                    if mode == "template_overlay":
+                if mode == "template_overlay":
+                    with profiler.stage(
+                        "render_page",
+                        page_number=page_number,
+                        mode=mode,
+                        block_count=len(page_blocks),
+                        table_count=len(page.get("tables", [])),
+                    ) if profiler else nullcontext():
                         rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks, font_catalog, font_cache, font_dir, font_baseline)
                         out_doc.insert_pdf(rendered_doc)
                         rendered_doc.close()
-                        if profiler:
-                            profiler.increment_counter("overlay_pages")
-                        continue
-                    with tempfile.NamedTemporaryFile(prefix=f"babel-copy-page-{page_number:03d}-", suffix=".pdf", delete=False) as tmp_file:
+                    if profiler:
+                        profiler.increment_counter("overlay_pages")
+                    page_index += 1
+                    continue
+
+                rebuild_pages: list[int] = []
+                chunk_end = page_index
+                while chunk_end < len(pages):
+                    chunk_page = pages[chunk_end]
+                    if choose_page_mode(chunk_page, assets_by_id) != "structured_rebuild":
+                        break
+                    rebuild_pages.append(int(chunk_page["page_number"]))
+                    chunk_end += 1
+                with profiler.stage(
+                    "render_rebuild_chunk",
+                    page_start=rebuild_pages[0],
+                    page_end=rebuild_pages[-1],
+                    page_count=len(rebuild_pages),
+                ) if profiler else nullcontext():
+                    with tempfile.NamedTemporaryFile(
+                        prefix=f"babel-copy-pages-{rebuild_pages[0]:03d}-{rebuild_pages[-1]:03d}-",
+                        suffix=".pdf",
+                        delete=False,
+                    ) as tmp_file:
                         temp_path = Path(tmp_file.name)
                     temp_paths.append(temp_path)
-                    render_page_via_typst(
+                    render_pages_via_typst(
                         payload,
-                        page_number,
+                        rebuild_pages,
                         temp_path,
                         assets_by_id,
                         source_doc,
@@ -605,12 +635,20 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                         font_dir,
                         profiler=profiler,
                     )
-                    with profiler.stage("load_rendered_page_pdf", page_number=page_number) if profiler else nullcontext():
+                    with profiler.stage(
+                        "load_rendered_chunk_pdf",
+                        page_start=rebuild_pages[0],
+                        page_end=rebuild_pages[-1],
+                        page_count=len(rebuild_pages),
+                    ) if profiler else nullcontext():
                         rendered_doc = fitz.open(temp_path)
                         out_doc.insert_pdf(rendered_doc)
                         rendered_doc.close()
-                    if profiler:
+                if profiler:
+                    profiler.increment_counter("rebuild_chunks")
+                    for _ in rebuild_pages:
                         profiler.increment_counter("rebuild_pages")
+                page_index = chunk_end
         with profiler.stage("save_output_pdf", path=output_pdf) if profiler else nullcontext():
             output_pdf.parent.mkdir(parents=True, exist_ok=True)
             out_doc.save(output_pdf, garbage=4, deflate=True)

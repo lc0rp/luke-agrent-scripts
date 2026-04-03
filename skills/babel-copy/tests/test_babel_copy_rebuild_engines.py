@@ -26,7 +26,7 @@ def load_module(
     assert spec.loader is not None
     if stub_modules:
         for name, stub in stub_modules.items():
-            sys.modules.setdefault(name, stub)
+            sys.modules[name] = stub
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
@@ -137,6 +137,78 @@ class StructuredRebuildTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(render_hybrid_document.call_args.args, (source_pdf.resolve(), {"pages": [], "blocks": []}, output_pdf.resolve()))
         self.assertIn("profiler", render_hybrid_document.call_args.kwargs)
+
+    def test_filtered_payload_for_pages_renumbers_multi_page_chunk(self) -> None:
+        payload = {
+            "input_pdf": "/tmp/source.pdf",
+            "font_baseline": {"family_class": "serif"},
+            "translation_mode": "desktop",
+            "pages": [
+                {
+                    "page_number": 2,
+                    "asset_ids": ["p2-logo"],
+                    "tables": [],
+                },
+                {
+                    "page_number": 3,
+                    "asset_ids": [],
+                    "tables": [
+                        {
+                            "id": "p3-table-1",
+                            "cells": [
+                                {
+                                    "id": "p3-r0-c0",
+                                    "signature_asset_ids": ["p3-sig1"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+            "blocks": [
+                {"id": "p2-b1", "page_number": 2, "bbox": [0, 0, 10, 10], "text": "Page 2"},
+                {
+                    "id": "p3-b1",
+                    "page_number": 3,
+                    "bbox": [0, 0, 10, 10],
+                    "text": "Page 3",
+                    "table": {"cell_id": "p3-r0-c0"},
+                },
+            ],
+            "assets": [
+                {"id": "p2-logo", "page_number": 2, "kind": "logo"},
+                {"id": "p3-sig1", "page_number": 3, "kind": "signature_crop"},
+            ],
+        }
+
+        filtered = BUILD_FINAL_PDF.filtered_payload_for_pages(
+            payload,
+            [2, 3],
+            BUILD_FINAL_PDF.asset_map(payload),
+        )
+
+        self.assertEqual(filtered["page_count"], 2)
+        self.assertEqual([page["page_number"] for page in filtered["pages"]], [1, 2])
+        self.assertEqual(filtered["pages"][1]["asset_ids"], ["p3-sig1"])
+        self.assertEqual([block["page_number"] for block in filtered["blocks"]], [1, 2])
+        self.assertEqual(
+            [(asset["id"], asset["page_number"]) for asset in filtered["assets"]],
+            [("p2-logo", 1), ("p3-sig1", 2)],
+        )
+
+    def test_contiguous_rebuild_chunks_groups_adjacent_rebuild_pages(self) -> None:
+        pages = [
+            {"page_number": 1, "page_type": "digital", "tables": [], "asset_ids": []},
+            {"page_number": 2, "page_type": "digital", "tables": [{"id": "p2-table"}], "asset_ids": []},
+            {"page_number": 3, "page_type": "digital", "tables": [], "asset_ids": ["p3-sig1"]},
+            {"page_number": 4, "page_type": "digital", "tables": [], "asset_ids": []},
+            {"page_number": 5, "page_type": "digital", "tables": [{"id": "p5-table"}], "asset_ids": []},
+        ]
+        assets_by_id = {"p3-sig1": {"id": "p3-sig1", "kind": "signature_crop"}}
+
+        chunks = BUILD_FINAL_PDF.contiguous_rebuild_chunks(pages, assets_by_id)
+
+        self.assertEqual(chunks, [[2, 3], [5]])
 
 
 if __name__ == "__main__":

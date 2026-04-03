@@ -157,40 +157,11 @@ def render_table(page: dict, table: dict, blocks_by_id: dict[str, dict], assets_
     )
 
 
-def main() -> int:
-    args = parse_args()
-    payload = apply_custom_overrides_to_payload(json.loads(Path(args.translated_blocks_json).read_text()))
-    font_baseline = core.font_baseline_from_payload(payload)
-    pages = payload.get("pages", [])
-    blocks = payload["blocks"]
-    assets = payload.get("assets", [])
-    if not pages:
-        raise SystemExit("Expected pages metadata in translated blocks payload.")
-
-    output_path = Path(args.output_typ).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    assets_dir = output_path.parent / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
-
-    blocks_by_id = {block["id"]: block for block in blocks}
-    assets_by_id = {asset["id"]: asset for asset in assets}
-    blocks_by_page: dict[int, list[dict]] = defaultdict(list)
-    for block in blocks:
-        blocks_by_page[int(block["page_number"])].append(block)
-    for page_blocks in blocks_by_page.values():
-        page_blocks.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
-
-    first_page = pages[0]
+def render_page(page: dict, page_blocks: list[dict], blocks_by_id: dict[str, dict], assets_by_id: dict[str, dict], assets_dir: Path) -> list[str]:
     lines = [
-        f"#set page(width: {typst_length(first_page['width'])}, height: {typst_length(first_page['height'])}, margin: (left: 36pt, right: 36pt, top: 32pt, bottom: 32pt))",
-        "#set par(justify: false)",
-        f"#set text(font: {typst_font_stack(font_baseline)}, size: 10.5pt)",
+        f"#set page(width: {typst_length(page['width'])}, height: {typst_length(page['height'])}, margin: (left: 36pt, right: 36pt, top: 32pt, bottom: 32pt))",
         "",
     ]
-
-    page = first_page
-    page_number = int(page["page_number"])
-    page_blocks = blocks_by_page.get(page_number, [])
     for block in page_blocks:
         if block.get("keep_original"):
             continue
@@ -204,8 +175,60 @@ def main() -> int:
     for table in sorted(page.get("tables", []), key=lambda item: item["bbox"][1]):
         lines.append(render_table(page, table, blocks_by_id, assets_by_id, assets_dir))
         lines.append("")
+    return lines
 
-    output_path.write_text("\n".join(lines).rstrip() + "\n")
+
+def build_typst_source(payload: dict, *, assets_dir: Path) -> str:
+    font_baseline = core.font_baseline_from_payload(payload)
+    pages = sorted(payload.get("pages", []), key=lambda item: int(item["page_number"]))
+    blocks = payload["blocks"]
+    assets = payload.get("assets", [])
+    if not pages:
+        raise SystemExit("Expected pages metadata in translated blocks payload.")
+
+    blocks_by_id = {block["id"]: block for block in blocks}
+    assets_by_id = {asset["id"]: asset for asset in assets}
+    blocks_by_page: dict[int, list[dict]] = defaultdict(list)
+    for block in blocks:
+        blocks_by_page[int(block["page_number"])].append(block)
+    for page_blocks in blocks_by_page.values():
+        page_blocks.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+
+    lines = [
+        "#set par(justify: false)",
+        f"#set text(font: {typst_font_stack(font_baseline)}, size: 10.5pt)",
+        "",
+    ]
+    for index, page in enumerate(pages):
+        if index:
+            lines.append("#pagebreak()")
+            lines.append("")
+        page_number = int(page["page_number"])
+        lines.extend(
+            render_page(
+                page,
+                blocks_by_page.get(page_number, []),
+                blocks_by_id,
+                assets_by_id,
+                assets_dir,
+            )
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_typst_document(payload: dict, output_path: Path) -> Path:
+    output_path = output_path.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    assets_dir = output_path.parent / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(build_typst_source(payload, assets_dir=assets_dir))
+    return output_path
+
+
+def main() -> int:
+    args = parse_args()
+    payload = apply_custom_overrides_to_payload(json.loads(Path(args.translated_blocks_json).read_text()))
+    output_path = write_typst_document(payload, Path(args.output_typ))
     print(output_path)
     return 0
 

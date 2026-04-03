@@ -27,10 +27,9 @@ def ensure_typst() -> str:
     raise SystemExit("Missing dependency: typst. Install the Typst CLI to render structured rebuild pages.")
 
 
-def main() -> int:
-    args = parse_args()
-    input_typ = Path(args.input_typ).expanduser().resolve()
-    output_pdf = Path(args.output_pdf).expanduser().resolve()
+def compile_typst_to_pdf(input_typ: Path, output_pdf: Path) -> Path:
+    input_typ = input_typ.expanduser().resolve()
+    output_pdf = output_pdf.expanduser().resolve()
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     typst = ensure_typst()
     subprocess.run(
@@ -44,6 +43,12 @@ def main() -> int:
         ],
         check=True,
     )
+    return output_pdf
+
+
+def main() -> int:
+    args = parse_args()
+    output_pdf = compile_typst_to_pdf(Path(args.input_typ), Path(args.output_pdf))
     print(output_pdf)
     return 0
 

@@ -27,7 +27,7 @@ def load_module(
     assert spec.loader is not None
     if stub_modules:
         for name, stub in stub_modules.items():
-            sys.modules.setdefault(name, stub)
+            sys.modules[name] = stub
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
