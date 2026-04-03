@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from copy import deepcopy
 import difflib
 import json
 import tempfile
@@ -170,6 +171,16 @@ def blocks_by_page(payload: dict) -> dict[int, list[dict]]:
     return grouped
 
 
+def ordered_page_asset_ids(page: dict) -> list[str]:
+    ordered_asset_ids = [str(asset_id) for asset_id in page.get("asset_ids", [])]
+    extra_asset_ids: set[str] = set()
+    for table_payload in page.get("tables", []):
+        for cell in table_payload.get("cells", []):
+            extra_asset_ids.update(str(asset_id) for asset_id in cell.get("signature_asset_ids", []))
+    ordered_asset_ids.extend(sorted(extra_asset_ids - set(ordered_asset_ids)))
+    return ordered_asset_ids
+
+
 def normalized_text(value: str) -> str:
     return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in value).split())
 
@@ -249,57 +260,38 @@ def should_ignore_artifact_obstacle(block: dict) -> bool:
     return width * height <= 4.0 and len(text) <= 1
 
 
-def filtered_payload_for_pages(payload: dict, page_numbers: list[int], assets_by_id: dict[str, dict]) -> dict:
-    ordered_page_numbers = [int(page_number) for page_number in page_numbers]
+def filtered_payload_for_pages(payload: dict, page_contexts: list[dict]) -> dict:
+    ordered_page_numbers = [int(page_context["page_number"]) for page_context in page_contexts]
     page_number_map = {page_number: index + 1 for index, page_number in enumerate(ordered_page_numbers)}
-    selected_pages = [
-        page
-        for page in payload.get("pages", [])
-        if int(page["page_number"]) in page_number_map
-    ]
     filtered_pages = []
     filtered_blocks = []
+    filtered_assets = []
     selected_asset_ids: set[str] = set()
-    for page in selected_pages:
-        original_page_number = int(page["page_number"])
+    for page_context in page_contexts:
+        page = page_context["page"]
+        original_page_number = int(page_context["page_number"])
         mapped_page_number = page_number_map[original_page_number]
-        page_blocks = [
-            block
-            for block in payload.get("blocks", [])
-            if int(block["page_number"]) == original_page_number
-        ]
-        asset_ids = set(page.get("asset_ids", []))
-        for block in page_blocks:
-            table = block.get("table")
-            if not table:
-                continue
-            cell_id = table.get("cell_id")
-            if not cell_id:
-                continue
-            for table_payload in page.get("tables", []):
-                for cell in table_payload.get("cells", []):
-                    if cell.get("id") == cell_id:
-                        asset_ids.update(cell.get("signature_asset_ids", []))
-        selected_asset_ids.update(asset_ids)
-        filtered_page = json.loads(json.dumps(page))
+        filtered_page = deepcopy(page)
         filtered_page["page_number"] = mapped_page_number
-        ordered_asset_ids = [asset_id for asset_id in page.get("asset_ids", []) if asset_id in asset_ids]
-        ordered_asset_ids.extend(sorted(asset_ids - set(ordered_asset_ids)))
-        filtered_page["asset_ids"] = ordered_asset_ids
+        filtered_page["asset_ids"] = [
+            str(asset["id"])
+            for asset in page_context["page_assets"]
+        ]
         for table in filtered_page.get("tables", []):
             table["page_number"] = mapped_page_number
         filtered_pages.append(filtered_page)
-        for block in page_blocks:
-            copied = json.loads(json.dumps(block))
+        for block in page_context["page_blocks"]:
+            copied = deepcopy(block)
             copied["page_number"] = mapped_page_number
             filtered_blocks.append(copied)
-    filtered_assets = []
-    for asset in payload.get("assets", []):
-        if asset["id"] not in selected_asset_ids:
-            continue
-        copied = json.loads(json.dumps(asset))
-        copied["page_number"] = page_number_map[int(asset["page_number"])]
-        filtered_assets.append(copied)
+        for asset in page_context["page_assets"]:
+            asset_id = str(asset["id"])
+            if asset_id in selected_asset_ids:
+                continue
+            selected_asset_ids.add(asset_id)
+            copied = deepcopy(asset)
+            copied["page_number"] = page_number_map[int(asset["page_number"])]
+            filtered_assets.append(copied)
     return {
         "input_pdf": payload.get("input_pdf"),
         "page_count": len(filtered_pages),
@@ -511,15 +503,6 @@ def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.
         return rect
     return fitz.Rect(rect.x0, rect.y0, round(next_x0, 2), rect.y1)
 
-
-def page_assets(page: dict, assets_by_id: dict[str, dict]) -> list[dict]:
-    return [
-        assets_by_id[asset_id]
-        for asset_id in page.get("asset_ids", [])
-        if asset_id in assets_by_id
-    ]
-
-
 def asset_file_hash(path: str | None, cache: dict[str, str]) -> str | None:
     if not path:
         return None
@@ -548,7 +531,7 @@ def block_render_fingerprint(block: dict) -> dict:
 def page_render_fingerprint(
     page: dict,
     page_blocks: list[dict],
-    assets_by_id: dict[str, dict],
+    page_assets_for_render: list[dict],
     font_baseline: dict[str, str],
     asset_hash_cache: dict[str, str],
 ) -> str:
@@ -569,7 +552,7 @@ def page_render_fingerprint(
                     "path": str(asset.get("path", "")),
                     "path_hash": asset_file_hash(asset.get("path"), asset_hash_cache),
                 }
-                for asset in page_assets(page, assets_by_id)
+                for asset in page_assets_for_render
             ],
             "tables": page.get("tables", []),
         }
@@ -580,11 +563,49 @@ def chunk_render_fingerprint(page_fingerprints: list[str]) -> str:
     return stable_json_hash(page_fingerprints)
 
 
+def build_page_contexts(
+    payload: dict,
+    assets_by_id: dict[str, dict],
+    font_baseline: dict[str, str],
+    asset_hash_cache: dict[str, str],
+) -> list[dict]:
+    blocks = blocks_by_page(payload)
+    page_contexts: list[dict] = []
+    for page in payload.get("pages", []):
+        page_number = int(page["page_number"])
+        page_blocks = blocks.get(page_number, [])
+        page_assets_for_render = [
+            assets_by_id[asset_id]
+            for asset_id in ordered_page_asset_ids(page)
+            if asset_id in assets_by_id
+        ]
+        mode = choose_page_mode(page, assets_by_id)
+        render_fingerprint = page_render_fingerprint(
+            page,
+            page_blocks,
+            page_assets_for_render,
+            font_baseline,
+            asset_hash_cache,
+        )
+        page["render_fingerprint"] = render_fingerprint
+        page["render_mode"] = mode
+        page_contexts.append(
+            {
+                "page": page,
+                "page_number": page_number,
+                "page_blocks": page_blocks,
+                "page_assets": page_assets_for_render,
+                "render_fingerprint": render_fingerprint,
+                "mode": mode,
+            }
+        )
+    return page_contexts
+
+
 def render_pages_via_typst(
     payload: dict,
-    page_numbers: list[int],
+    page_contexts: list[dict],
     output_pdf: Path,
-    assets_by_id: dict[str, dict],
     source_doc: fitz.Document,
     font_catalog: dict[str, tuple],
     font_baseline: dict[str, str],
@@ -592,6 +613,7 @@ def render_pages_via_typst(
     temp_dir: Path,
     profiler=None,
 ) -> Path:
+    page_numbers = [int(page_context["page_number"]) for page_context in page_contexts]
     chunk_label = f"{page_numbers[0]:03d}-{page_numbers[-1]:03d}"
     with profiler.stage(
         "filter_rebuild_chunk_payload",
@@ -599,7 +621,7 @@ def render_pages_via_typst(
         page_end=page_numbers[-1],
         page_count=len(page_numbers),
     ) if profiler else nullcontext():
-        page_payload = filtered_payload_for_pages(payload, page_numbers, assets_by_id)
+        page_payload = filtered_payload_for_pages(payload, page_contexts)
     default_text_font = str(font_baseline.get("text_font_name") or core.TEXT_SERIF_FONT_NAME)
     for block in page_payload.get("blocks", []):
         style = block.setdefault("style", {})
@@ -635,7 +657,6 @@ def render_pages_via_typst(
 
 
 def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, profiler=None) -> Path:
-    blocks = blocks_by_page(payload)
     assets_by_id = asset_map(payload)
     cache_dir = output_pdf.parent / ".build-cache"
     with profiler.stage("open_source_pdf", path=source_pdf) if profiler else nullcontext():
@@ -647,26 +668,19 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
     font_usability_cache: dict[str, bool] = {}
     asset_hash_cache: dict[str, str] = {}
     font_baseline = core.font_baseline_from_payload(payload)
-    pages = payload.get("pages", [])
+    page_contexts = build_page_contexts(payload, assets_by_id, font_baseline, asset_hash_cache)
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="babel-copy-fonts-") as font_dir_raw:
             font_dir = Path(font_dir_raw)
             page_index = 0
-            while page_index < len(pages):
-                page = pages[page_index]
-                page_number = int(page["page_number"])
-                mode = choose_page_mode(page, assets_by_id)
-                page_blocks = blocks.get(page_number, [])
-                page_fingerprint = page_render_fingerprint(
-                    page,
-                    page_blocks,
-                    assets_by_id,
-                    font_baseline,
-                    asset_hash_cache,
-                )
-                page["render_fingerprint"] = page_fingerprint
-                page["render_mode"] = mode
+            while page_index < len(page_contexts):
+                page_context = page_contexts[page_index]
+                page = page_context["page"]
+                page_number = int(page_context["page_number"])
+                mode = str(page_context["mode"])
+                page_blocks = page_context["page_blocks"]
+                page_fingerprint = str(page_context["render_fingerprint"])
                 if mode == "template_overlay":
                     cache_path = cache_dir / f"page-{page_number:03d}-{page_fingerprint[:16]}.pdf"
                     page["render_cache_path"] = str(cache_path)
@@ -699,32 +713,27 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                     page_index += 1
                     continue
 
-                rebuild_pages: list[int] = []
+                rebuild_contexts: list[dict] = []
                 chunk_end = page_index
-                while chunk_end < len(pages):
-                    chunk_page = pages[chunk_end]
-                    if choose_page_mode(chunk_page, assets_by_id) != "structured_rebuild":
+                while chunk_end < len(page_contexts):
+                    chunk_context = page_contexts[chunk_end]
+                    if chunk_context["mode"] != "structured_rebuild":
                         break
-                    rebuild_pages.append(int(chunk_page["page_number"]))
+                    rebuild_contexts.append(chunk_context)
                     chunk_end += 1
+                rebuild_pages = [int(page_context["page_number"]) for page_context in rebuild_contexts]
                 rebuild_page_fingerprints = [
-                    page_render_fingerprint(
-                        pages[index],
-                        blocks.get(int(pages[index]["page_number"]), []),
-                        assets_by_id,
-                        font_baseline,
-                        asset_hash_cache,
-                    )
-                    for index in range(page_index, chunk_end)
+                    str(page_context["render_fingerprint"])
+                    for page_context in rebuild_contexts
                 ]
                 chunk_fingerprint = chunk_render_fingerprint(rebuild_page_fingerprints)
                 cache_path = cache_dir / (
                     f"chunk-{rebuild_pages[0]:03d}-{rebuild_pages[-1]:03d}-{chunk_fingerprint[:16]}.pdf"
                 )
-                for index, fingerprint in zip(range(page_index, chunk_end), rebuild_page_fingerprints):
-                    pages[index]["render_fingerprint"] = fingerprint
-                    pages[index]["render_mode"] = "structured_rebuild"
-                    pages[index]["render_cache_path"] = str(cache_path)
+                for page_context, fingerprint in zip(rebuild_contexts, rebuild_page_fingerprints):
+                    page_context["page"]["render_fingerprint"] = fingerprint
+                    page_context["page"]["render_mode"] = "structured_rebuild"
+                    page_context["page"]["render_cache_path"] = str(cache_path)
                 if cache_path.exists():
                     with profiler.stage(
                         "reuse_cached_rebuild_chunk",
@@ -756,9 +765,8 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                     temp_paths.append(temp_path)
                     render_pages_via_typst(
                         payload,
-                        rebuild_pages,
+                        rebuild_contexts,
                         temp_path,
-                        assets_by_id,
                         source_doc,
                         font_catalog,
                         font_baseline,
