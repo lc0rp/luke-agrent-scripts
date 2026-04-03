@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from profiling import create_profiler, resolve_profile_path
+from run_manifest import stable_json_hash, update_run_manifest
 from translation_runtime import (
     TRANSLATION_PROVIDER_CHOICES,
     detect_runtime_mode,
@@ -22,6 +23,9 @@ from translation_runtime import (
 )
 
 DESKTOP_TRANSLATION_BACKENDS = {"auto", "codex", "claude"}
+DEFAULT_BATCH_SIZE = 64
+DEFAULT_BATCH_CHAR_BUDGET = 12000
+PAGE_BREAK_BATCH_FILL_RATIO = 0.72
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -49,7 +53,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     prepare_parser.add_argument("--source-lang", default="French")
     prepare_parser.add_argument("--target-lang", default="English")
     prepare_parser.add_argument("--model")
-    prepare_parser.add_argument("--batch-size", type=int, default=18)
+    prepare_parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    prepare_parser.add_argument(
+        "--batch-char-budget",
+        type=int,
+        default=DEFAULT_BATCH_CHAR_BUDGET,
+    )
     prepare_parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
     add_profiler_arguments(prepare_parser)
 
@@ -72,7 +81,12 @@ def add_translation_io_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-lang", default="French")
     parser.add_argument("--target-lang", default="English")
     parser.add_argument("--model")
-    parser.add_argument("--batch-size", type=int, default=18)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument(
+        "--batch-char-budget",
+        type=int,
+        default=DEFAULT_BATCH_CHAR_BUDGET,
+    )
     parser.add_argument("--provider", choices=TRANSLATION_PROVIDER_CHOICES)
     add_profiler_arguments(parser)
 
@@ -95,23 +109,65 @@ def translatable_blocks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return blocks
 
 
-def chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
-    return [items[index : index + size] for index in range(0, len(items), size)]
+def block_translation_fingerprint(block: dict[str, Any]) -> str:
+    existing = str(block.get("fingerprint", "")).strip()
+    if existing:
+        return existing
+    return stable_json_hash(
+        {
+            "id": str(block.get("id", "")),
+            "page_number": int(block.get("page_number", 0) or 0),
+            "role": str(block.get("role", "")),
+            "bbox": [round(float(value), 2) for value in block.get("bbox", [])],
+            "text": str(block.get("text", "")),
+            "table": block.get("table"),
+        }
+    )
 
 
-def build_prompt(
-    batch: list[dict[str, Any]], source_lang: str, target_lang: str
+def translated_blocks_cache_path(blocks_json: Path) -> Path:
+    return blocks_json.parent / "translated_blocks.json"
+
+
+def cached_translations_for_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    translated_blocks_path: Path,
+) -> dict[str, str]:
+    if not translated_blocks_path.exists():
+        return {}
+    payload = json.loads(translated_blocks_path.read_text())
+    previous_blocks = {
+        str(block.get("id", "")): block
+        for block in payload.get("blocks", [])
+        if isinstance(block, dict)
+    }
+    cached: dict[str, str] = {}
+    for block in blocks:
+        previous = previous_blocks.get(str(block.get("id", "")))
+        if not previous:
+            continue
+        if block_translation_fingerprint(previous) != block_translation_fingerprint(block):
+            continue
+        translated = previous.get("translated_text")
+        if translated is None:
+            continue
+        cached[str(block["id"])] = str(translated)
+    return cached
+
+
+def translation_block_prompt_payload(block: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "block_id": block["id"],
+        "page_number": block["page_number"],
+        "role": block.get("role"),
+        "text": block.get("text"),
+    }
+
+
+def build_prompt_from_payloads(
+    blocks_payload: list[dict[str, Any]], source_lang: str, target_lang: str
 ) -> str:
-    blocks_payload = []
-    for block in batch:
-        blocks_payload.append(
-            {
-                "block_id": block["id"],
-                "page_number": block["page_number"],
-                "role": block.get("role"),
-                "text": block.get("text"),
-            }
-        )
     return f"""Translate the following document blocks from {source_lang} to {target_lang}.
 
 Requirements:
@@ -134,6 +190,81 @@ Return exactly this shape:
 Blocks:
 {json.dumps(blocks_payload, ensure_ascii=False, indent=2)}
 """
+
+
+def build_prompt(
+    batch: list[dict[str, Any]], source_lang: str, target_lang: str
+) -> str:
+    return build_prompt_from_payloads(
+        [translation_block_prompt_payload(block) for block in batch],
+        source_lang,
+        target_lang,
+    )
+
+
+def chunk_translation_batches(
+    items: list[dict[str, Any]],
+    *,
+    source_lang: str,
+    target_lang: str,
+    max_blocks: int,
+    max_prompt_chars: int,
+) -> list[list[dict[str, Any]]]:
+    max_blocks = max(1, max_blocks)
+    max_prompt_chars = max(1, max_prompt_chars)
+    batches: list[list[dict[str, Any]]] = []
+    current_blocks: list[dict[str, Any]] = []
+    current_payloads: list[dict[str, Any]] = []
+    current_prompt_chars = 0
+
+    def flush_current() -> None:
+        nonlocal current_blocks, current_payloads, current_prompt_chars
+        if not current_blocks:
+            return
+        batches.append(current_blocks)
+        current_blocks = []
+        current_payloads = []
+        current_prompt_chars = 0
+
+    for block in items:
+        payload = translation_block_prompt_payload(block)
+        block_page = int(block.get("page_number", 0) or 0)
+        previous_page = (
+            int(current_blocks[-1].get("page_number", 0) or 0)
+            if current_blocks
+            else block_page
+        )
+        if (
+            current_blocks
+            and block_page != previous_page
+            and current_prompt_chars >= int(max_prompt_chars * PAGE_BREAK_BATCH_FILL_RATIO)
+        ):
+            flush_current()
+
+        candidate_payloads = [*current_payloads, payload]
+        candidate_prompt_chars = len(
+            build_prompt_from_payloads(candidate_payloads, source_lang, target_lang)
+        )
+        if current_blocks and (
+            len(current_blocks) >= max_blocks
+            or candidate_prompt_chars > max_prompt_chars
+        ):
+            flush_current()
+            candidate_payloads = [payload]
+            candidate_prompt_chars = len(
+                build_prompt_from_payloads(
+                    candidate_payloads,
+                    source_lang,
+                    target_lang,
+                )
+            )
+
+        current_blocks.append(block)
+        current_payloads = candidate_payloads
+        current_prompt_chars = candidate_prompt_chars
+
+    flush_current()
+    return batches
 
 
 def parse_json_response(raw: str) -> dict[str, str]:
@@ -175,6 +306,7 @@ def prepare_request_payload(
     source_lang: str,
     target_lang: str,
     batch_size: int,
+    batch_char_budget: int,
     provider: str,
     model: str | None,
     profiler=None,
@@ -183,7 +315,20 @@ def prepare_request_payload(
         payload = json.loads(blocks_json.read_text())
     with profiler.stage("collect_translatable_blocks") if profiler else nullcontext():
         blocks = translatable_blocks(payload)
-        batches = chunked(blocks, max(1, batch_size))
+        cached_translations = cached_translations_for_blocks(
+            blocks,
+            translated_blocks_path=translated_blocks_cache_path(blocks_json),
+        )
+        pending_blocks = [
+            block for block in blocks if str(block["id"]) not in cached_translations
+        ]
+        batches = chunk_translation_batches(
+            pending_blocks,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            max_blocks=batch_size,
+            max_prompt_chars=batch_char_budget,
+        )
         runtime_mode = detect_runtime_mode(provider)
 
     requests = []
@@ -202,6 +347,9 @@ def prepare_request_payload(
                     "model": model,
                     "source_lang": source_lang,
                     "target_lang": target_lang,
+                    "page_numbers": sorted(
+                        {int(block["page_number"]) for block in batch}
+                    ),
                     "block_ids": [str(block["id"]) for block in batch],
                     "prompt": build_prompt(batch, source_lang, target_lang),
                     "response_shape": {
@@ -224,11 +372,16 @@ def prepare_request_payload(
         "provider": provider,
         "runtime_mode": runtime_mode,
         "model": model,
+        "batch_size": max(1, batch_size),
+        "batch_char_budget": max(1, batch_char_budget),
+        "cached_translation_count": len(cached_translations),
+        "cached_translations": cached_translations,
         "request_count": len(requests),
         "requests": requests,
     }
     if profiler:
         profiler.set_counter("block_count", len(blocks))
+        profiler.set_counter("cached_translation_count", len(cached_translations))
         profiler.set_counter("request_count", len(requests))
         profiler.set_counter(
             "prompt_char_count",
@@ -237,6 +390,17 @@ def prepare_request_payload(
     with profiler.stage("write_requests_json", path=output_json) if profiler else nullcontext():
         output_json.parent.mkdir(parents=True, exist_ok=True)
         output_json.write_text(json.dumps(request_payload, indent=2, ensure_ascii=False))
+        update_run_manifest(
+            blocks_json.parent / "run-manifest.json",
+            {
+                "translate_prepare": {
+                    "blocks_json": str(blocks_json),
+                    "translation_requests_json": str(output_json),
+                    "request_count": len(requests),
+                    "cached_translation_count": len(cached_translations),
+                }
+            },
+        )
     return output_json
 
 
@@ -322,6 +486,11 @@ def apply_response_payload(
     }
     translations: dict[str, str] = {}
     seen_request_ids: set[str] = set()
+    cached_translations = request_payload.get("cached_translations", {})
+    if isinstance(cached_translations, dict):
+        translations.update(
+            {str(key): str(value) for key, value in cached_translations.items()}
+        )
     with profiler.stage("parse_responses", response_count=len(entries)) if profiler else nullcontext():
         for entry in entries:
             request_id = str(entry.get("request_id", "")).strip()
@@ -361,6 +530,19 @@ def apply_response_payload(
     with profiler.stage("write_translated_blocks", path=output_json) if profiler else nullcontext():
         output_json.parent.mkdir(parents=True, exist_ok=True)
         output_json.write_text(json.dumps(final_payload, indent=2, ensure_ascii=False))
+        update_run_manifest(
+            output_json.parent / "run-manifest.json",
+            {
+                "translate_apply": {
+                    "translated_blocks_json": str(output_json),
+                    "request_count": len(request_ids),
+                    "response_count": len(entries),
+                    "cached_translation_count": len(cached_translations)
+                    if isinstance(cached_translations, dict)
+                    else 0,
+                }
+            },
+        )
     return output_json
 
 
@@ -409,6 +591,7 @@ def main() -> int:
                 source_lang=args.source_lang,
                 target_lang=args.target_lang,
                 batch_size=args.batch_size,
+                batch_char_budget=args.batch_char_budget,
                 provider=provider,
                 model=args.model,
                 profiler=profiler,

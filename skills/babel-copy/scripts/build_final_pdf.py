@@ -25,6 +25,7 @@ import core
 import export_typst_pdf
 from profiling import create_profiler, resolve_profile_path
 import rebuild_typst
+from run_manifest import sha256_file, stable_json_hash, update_run_manifest
 
 
 def parse_args() -> argparse.Namespace:
@@ -511,6 +512,74 @@ def render_rect_for_block(block: dict, page_blocks: list[dict], page_rect: fitz.
     return fitz.Rect(rect.x0, rect.y0, round(next_x0, 2), rect.y1)
 
 
+def page_assets(page: dict, assets_by_id: dict[str, dict]) -> list[dict]:
+    return [
+        assets_by_id[asset_id]
+        for asset_id in page.get("asset_ids", [])
+        if asset_id in assets_by_id
+    ]
+
+
+def asset_file_hash(path: str | None, cache: dict[str, str]) -> str | None:
+    if not path:
+        return None
+    cached = cache.get(path)
+    if cached is not None:
+        return cached or None
+    file_path = Path(path)
+    hashed = sha256_file(file_path) if file_path.exists() else None
+    cache[path] = hashed or ""
+    return hashed
+
+
+def block_render_fingerprint(block: dict) -> dict:
+    return {
+        "id": str(block.get("id", "")),
+        "role": str(block.get("role", "")),
+        "align": str(block.get("align", "")),
+        "keep_original": bool(block.get("keep_original")),
+        "bbox": [round(float(value), 2) for value in block.get("bbox", [])],
+        "text": str(block_render_text(block)),
+        "table": block.get("table"),
+        "style": block.get("style"),
+    }
+
+
+def page_render_fingerprint(
+    page: dict,
+    page_blocks: list[dict],
+    assets_by_id: dict[str, dict],
+    font_baseline: dict[str, str],
+    asset_hash_cache: dict[str, str],
+) -> str:
+    return stable_json_hash(
+        {
+            "page_number": int(page["page_number"]),
+            "page_type": str(page.get("page_type", "")),
+            "region_source": str(page.get("region_source", "")),
+            "strategy_hint": str(page.get("strategy_hint", "")),
+            "source_fingerprint": str(page.get("source_fingerprint", "")),
+            "font_baseline": font_baseline,
+            "blocks": [block_render_fingerprint(block) for block in page_blocks],
+            "assets": [
+                {
+                    "id": str(asset.get("id", "")),
+                    "kind": str(asset.get("kind", "")),
+                    "bbox": [round(float(value), 2) for value in asset.get("bbox", [])],
+                    "path": str(asset.get("path", "")),
+                    "path_hash": asset_file_hash(asset.get("path"), asset_hash_cache),
+                }
+                for asset in page_assets(page, assets_by_id)
+            ],
+            "tables": page.get("tables", []),
+        }
+    )
+
+
+def chunk_render_fingerprint(page_fingerprints: list[str]) -> str:
+    return stable_json_hash(page_fingerprints)
+
+
 def render_pages_via_typst(
     payload: dict,
     page_numbers: list[int],
@@ -568,6 +637,7 @@ def render_pages_via_typst(
 def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, profiler=None) -> Path:
     blocks = blocks_by_page(payload)
     assets_by_id = asset_map(payload)
+    cache_dir = output_pdf.parent / ".build-cache"
     with profiler.stage("open_source_pdf", path=source_pdf) if profiler else nullcontext():
         source_doc = fitz.open(source_pdf)
     out_doc = fitz.open()
@@ -575,9 +645,11 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
     font_catalog = build_source_font_catalog(source_doc)
     font_cache: dict[str, tuple[str, str | None]] = {}
     font_usability_cache: dict[str, bool] = {}
+    asset_hash_cache: dict[str, str] = {}
     font_baseline = core.font_baseline_from_payload(payload)
     pages = payload.get("pages", [])
     try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="babel-copy-fonts-") as font_dir_raw:
             font_dir = Path(font_dir_raw)
             page_index = 0
@@ -586,7 +658,31 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                 page_number = int(page["page_number"])
                 mode = choose_page_mode(page, assets_by_id)
                 page_blocks = blocks.get(page_number, [])
+                page_fingerprint = page_render_fingerprint(
+                    page,
+                    page_blocks,
+                    assets_by_id,
+                    font_baseline,
+                    asset_hash_cache,
+                )
+                page["render_fingerprint"] = page_fingerprint
+                page["render_mode"] = mode
                 if mode == "template_overlay":
+                    cache_path = cache_dir / f"page-{page_number:03d}-{page_fingerprint[:16]}.pdf"
+                    page["render_cache_path"] = str(cache_path)
+                    if cache_path.exists():
+                        with profiler.stage(
+                            "reuse_cached_overlay_page",
+                            page_number=page_number,
+                            mode=mode,
+                        ) if profiler else nullcontext():
+                            cached_doc = fitz.open(cache_path)
+                            out_doc.insert_pdf(cached_doc)
+                            cached_doc.close()
+                        if profiler:
+                            profiler.increment_counter("cached_overlay_pages")
+                        page_index += 1
+                        continue
                     with profiler.stage(
                         "render_page",
                         page_number=page_number,
@@ -596,6 +692,7 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                     ) if profiler else nullcontext():
                         rendered_doc = render_overlay_page(source_doc, page_index, page, page_blocks, font_catalog, font_cache, font_dir, font_baseline)
                         out_doc.insert_pdf(rendered_doc)
+                        rendered_doc.save(cache_path, garbage=4, deflate=True)
                         rendered_doc.close()
                     if profiler:
                         profiler.increment_counter("overlay_pages")
@@ -610,6 +707,40 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                         break
                     rebuild_pages.append(int(chunk_page["page_number"]))
                     chunk_end += 1
+                rebuild_page_fingerprints = [
+                    page_render_fingerprint(
+                        pages[index],
+                        blocks.get(int(pages[index]["page_number"]), []),
+                        assets_by_id,
+                        font_baseline,
+                        asset_hash_cache,
+                    )
+                    for index in range(page_index, chunk_end)
+                ]
+                chunk_fingerprint = chunk_render_fingerprint(rebuild_page_fingerprints)
+                cache_path = cache_dir / (
+                    f"chunk-{rebuild_pages[0]:03d}-{rebuild_pages[-1]:03d}-{chunk_fingerprint[:16]}.pdf"
+                )
+                for index, fingerprint in zip(range(page_index, chunk_end), rebuild_page_fingerprints):
+                    pages[index]["render_fingerprint"] = fingerprint
+                    pages[index]["render_mode"] = "structured_rebuild"
+                    pages[index]["render_cache_path"] = str(cache_path)
+                if cache_path.exists():
+                    with profiler.stage(
+                        "reuse_cached_rebuild_chunk",
+                        page_start=rebuild_pages[0],
+                        page_end=rebuild_pages[-1],
+                        page_count=len(rebuild_pages),
+                    ) if profiler else nullcontext():
+                        cached_doc = fitz.open(cache_path)
+                        out_doc.insert_pdf(cached_doc)
+                        cached_doc.close()
+                    if profiler:
+                        profiler.increment_counter("cached_rebuild_chunks")
+                        for _ in rebuild_pages:
+                            profiler.increment_counter("cached_rebuild_pages")
+                    page_index = chunk_end
+                    continue
                 with profiler.stage(
                     "render_rebuild_chunk",
                     page_start=rebuild_pages[0],
@@ -635,6 +766,7 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
                         font_dir,
                         profiler=profiler,
                     )
+                    cache_path.write_bytes(temp_path.read_bytes())
                     with profiler.stage(
                         "load_rendered_chunk_pdf",
                         page_start=rebuild_pages[0],
@@ -665,6 +797,7 @@ def main() -> int:
     source_pdf = Path(args.source_pdf).expanduser().resolve()
     translated_blocks_json = Path(args.translated_blocks_json).expanduser().resolve()
     output_pdf = Path(args.output_pdf).expanduser().resolve()
+    run_manifest_path = translated_blocks_json.parent / "run-manifest.json"
     profiler = create_profiler(
         resolve_profile_path(
             cli_enabled=bool(args.profiler),
@@ -686,10 +819,33 @@ def main() -> int:
             payload = apply_custom_overrides_to_payload(
                 json.loads(translated_blocks_json.read_text())
             )
+        with profiler.stage("hash_source_pdf", path=source_pdf):
+            document_hash = sha256_file(source_pdf)
         profiler.set_counter("page_count", len(payload.get("pages", [])))
         profiler.set_counter("block_count", len(payload.get("blocks", [])))
         rendered = render_hybrid_document(source_pdf, payload, output_pdf, profiler=profiler)
+        update_run_manifest(
+            run_manifest_path,
+            {
+                "input_pdf": str(source_pdf),
+                "document_hash": document_hash,
+                "build": {
+                    "translated_blocks_json": str(translated_blocks_json),
+                    "output_pdf": str(output_pdf),
+                    "cache_dir": str(output_pdf.parent / ".build-cache"),
+                    "page_render_fingerprints": {
+                        str(page.get("page_number")): {
+                            "mode": str(page.get("render_mode", "")),
+                            "fingerprint": str(page.get("render_fingerprint", "")),
+                            "cache_path": str(page.get("render_cache_path", "")),
+                        }
+                        for page in payload.get("pages", [])
+                    },
+                },
+            },
+        )
         print(rendered)
+        print(run_manifest_path)
         profiler.finish(status="ok")
         return 0
     except BaseException as exc:

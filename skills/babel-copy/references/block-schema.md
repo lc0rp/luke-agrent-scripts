@@ -128,6 +128,7 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 ## Notes
 
 - `font_baseline` is a document-level fallback decision. Set it from visual inspection first whenever possible.
+- `pages[].render_path` is optional. It should point to a saved QA PNG when `extract_document.py --write-page-renders` was used, otherwise it may be `null`.
 - If `font_baseline` conflicts with weak extracted font metadata or a source font that is not embedded / not reusable, the visual baseline should win.
 - `font_baseline.family_class` should be `serif` or `sans`.
 - PDF overlay fallback mapping is `serif -> Times-Roman`, `sans -> helv`.

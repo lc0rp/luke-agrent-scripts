@@ -15,17 +15,21 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+from copy import deepcopy
+import hashlib
 import json
 import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
+from typing import TYPE_CHECKING
 
 import fitz
 import numpy as np
 from PIL import Image
 from profiling import create_profiler, resolve_profile_path
+from run_manifest import sha256_file, stable_json_hash, update_run_manifest
 from translation_runtime import (
     TRANSLATION_PROVIDER_CHOICES,
     detect_runtime_mode,
@@ -45,11 +49,16 @@ from core import (
     extract_ocr_regions,
     font_baseline_from_payload,
     infer_alignment,
+    ocr_image_to_lines,
     normalize_font_family_class,
-    ocr_image_to_string,
+    ocr_page_image,
     parse_page_selection,
+    page_image_fast,
     split_leading_marker,
 )
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
 
 _FRAGMENT_MERGE_LLM_CACHE: dict[str, bool] = {}
 
@@ -88,7 +97,126 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profiler", action="store_true")
     parser.add_argument("--profiler-commands")
     parser.add_argument("--profiler-output-dir")
+    parser.add_argument(
+        "--write-page-renders",
+        action="store_true",
+        help="Write page PNG renders to disk for QA artifacts.",
+    )
     return parser.parse_args()
+
+
+class PageRenderCache:
+    def __init__(self, page: fitz.Page, dpi: int, render_path: Path | None = None):
+        self.page = page
+        self.dpi = dpi
+        self.render_path = render_path
+        self._layout_image: PILImage | None = None
+        self._render_written = False
+
+    def layout_image(self) -> PILImage:
+        if self._layout_image is None:
+            self._layout_image = page_image_fast(self.page, dpi=self.dpi)
+        return self._layout_image
+
+    def write_layout_render(self) -> Path | None:
+        if self.render_path is None:
+            return None
+        self.render_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._render_written:
+            self.layout_image().save(self.render_path, format="PNG")
+            self._render_written = True
+        return self.render_path
+
+
+def page_source_fingerprint(page: fitz.Page) -> str:
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), alpha=False)
+    return stable_json_hash(
+        {
+            "width": pixmap.width,
+            "height": pixmap.height,
+            "stride": pixmap.stride,
+            "samples_sha256": hashlib.sha256(bytes(pixmap.samples)).hexdigest(),
+        }
+    )
+
+
+def block_cache_fingerprint(block: dict) -> str:
+    return stable_json_hash(
+        {
+            "id": str(block.get("id", "")),
+            "page_number": int(block.get("page_number", 0) or 0),
+            "source": str(block.get("source", "")),
+            "role": str(block.get("role", "")),
+            "align": str(block.get("align", "")),
+            "bbox": [round(float(value), 2) for value in block.get("bbox", [])],
+            "text": str(block.get("text", "")),
+            "table": block.get("table"),
+        }
+    )
+
+
+def stamp_block_fingerprints(page_blocks: list[dict]) -> None:
+    for block in page_blocks:
+        block["fingerprint"] = block_cache_fingerprint(block)
+
+
+def asset_paths_exist(assets: list[dict]) -> bool:
+    for asset in assets:
+        path = asset.get("path")
+        if path and not Path(path).exists():
+            return False
+    return True
+
+
+def extend_markdown_for_page(
+    markdown_lines: list[str], page_number: int, page_blocks: list[dict]
+) -> None:
+    markdown_lines.append(f"## Page {page_number}")
+    markdown_lines.append("")
+    ordered = sorted(page_blocks, key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    for block in ordered:
+        if block.get("keep_original") or block.get("role") == "artifact":
+            continue
+        text = str(block.get("text", "")).strip()
+        if not text:
+            continue
+        markdown_lines.append(text)
+        markdown_lines.append("")
+
+
+def previous_assets_for_page(previous_payload: dict, page_number: int) -> list[dict]:
+    return [
+        deepcopy(asset)
+        for asset in previous_payload.get("assets", [])
+        if int(asset.get("page_number", 0) or 0) == page_number
+    ]
+
+
+def previous_blocks_for_page(previous_payload: dict, page_number: int) -> list[dict]:
+    return [
+        deepcopy(block)
+        for block in previous_payload.get("blocks", [])
+        if int(block.get("page_number", 0) or 0) == page_number
+    ]
+
+
+def can_reuse_extracted_page(
+    *,
+    previous_page: dict | None,
+    page_fingerprint: str,
+    previous_page_assets: list[dict],
+    write_page_renders: bool,
+) -> bool:
+    if not previous_page:
+        return False
+    if str(previous_page.get("source_fingerprint", "")) != page_fingerprint:
+        return False
+    if not asset_paths_exist(previous_page_assets):
+        return False
+    render_path = previous_page.get("render_path")
+    if write_page_renders and render_path and not Path(render_path).exists():
+        return False
+    return True
 
 
 def merge_regions(regions):
@@ -629,6 +757,10 @@ def block_is_ocr(block: dict) -> bool:
     return str(block.get("source", "")).startswith("ocr")
 
 
+def block_is_native(block: dict) -> bool:
+    return str(block.get("source", "")) == "native"
+
+
 def block_looks_like_toc_entry(block: dict) -> bool:
     text = clean_text(str(block.get("text", "")))
     if not text:
@@ -761,8 +893,8 @@ def export_page_assets(
     return exported
 
 
-def detect_tables(render_path: Path, page_rect: fitz.Rect) -> list[dict]:
-    image = Image.open(render_path).convert("L")
+def detect_tables(render_image: PILImage, page_rect: fitz.Rect) -> list[dict]:
+    image = render_image.convert("L")
     array = np.array(image)
     dark = array < 190
     height, width = array.shape
@@ -1363,7 +1495,7 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
     if previous.get("role") == "artifact" or current.get("role") == "artifact":
         return False
     gap = float(current["bbox"][1]) - float(previous["bbox"][3])
-    if gap < -6 or gap > 18:
+    if gap > 18:
         return False
     previous_text = str(previous.get("text", "")).strip()
     current_text = str(current.get("text", "")).strip()
@@ -1377,9 +1509,37 @@ def should_merge_fragment(previous: dict, current: dict) -> bool:
         and previous_style != current_style
     ):
         return False
+    previous_rect = fitz.Rect(previous["bbox"])
+    current_rect = fitz.Rect(current["bbox"])
+    if block_is_native(previous) and block_is_native(current):
+        previous_center = (previous_rect.x0 + previous_rect.x1) / 2
+        current_center = (current_rect.x0 + current_rect.x1) / 2
+        current_width_ratio = current_rect.width / max(previous_rect.width, 1.0)
+        if (
+            str(previous.get("role", "")) == "heading"
+            and str(current.get("role", "")) == "heading"
+            and str(previous.get("align", "left")) == "center"
+            and str(current.get("align", "left")) == "center"
+            and -8.0 <= gap <= 10.0
+            and abs(previous_center - current_center) <= 24.0
+        ):
+            return True
+        if (
+            str(previous.get("role", "")) in {"paragraph", "heading"}
+            and str(current.get("role", "")) in {"paragraph", "heading"}
+            and previous_text[-1:] not in {".", ":", ";", "!", "?"}
+            and -8.0 <= gap <= 8.0
+            and abs(current_rect.x0 - previous_rect.x0) <= 10.0
+            and current_rect.x1 <= previous_rect.x1 + 12.0
+            and current_width_ratio <= 0.82
+        ):
+            if current_text[:1].islower():
+                return True
+            if str(current.get("role", "")) == "heading" or len(current_text) <= 64:
+                return True
+    if gap < -6:
+        return False
     if block_is_ocr(previous) and block_is_ocr(current):
-        previous_rect = fitz.Rect(previous["bbox"])
-        current_rect = fitz.Rect(current["bbox"])
         if (
             ("|" in previous_text or previous.get("role") == "table_cell")
             and gap <= 16
@@ -1534,6 +1694,16 @@ def fragment_merge_request_model() -> str | None:
     return value or None
 
 
+def fragment_merge_request_max_pairs() -> int:
+    value = os.environ.get("BABEL_COPY_FRAGMENT_MERGE_REQUEST_MAX_PAIRS", "").strip()
+    if not value:
+        return 48
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return 48
+
+
 def build_fragment_merge_prompt(candidates: list[dict]) -> str:
     payload = []
     for item in candidates:
@@ -1598,13 +1768,15 @@ def build_fragment_merge_request(
     *,
     cwd: Path,
     provider: str | None,
+    request_index: int = 1,
 ) -> dict:
     runtime_mode = detect_runtime_mode(translation_provider(provider))
-    request_id = f"page-{int(candidates[0]['page_number']):03d}-fragment-merge"
+    page_numbers = sorted({int(candidate["page_number"]) for candidate in candidates})
+    request_id = f"fragment-merge-{request_index:03d}"
     return {
         "request_id": request_id,
-        "kind": "fragment_merge_page",
-        "page_number": int(candidates[0]["page_number"]),
+        "kind": "fragment_merge_batch",
+        "page_numbers": page_numbers,
         "runtime_mode": runtime_mode,
         "provider": translation_provider(provider),
         "model": fragment_merge_request_model(),
@@ -1630,6 +1802,33 @@ def build_fragment_merge_request(
             "Require a JSON-only reply that matches response_shape."
         ),
     }
+
+
+def build_fragment_merge_requests(
+    candidates: list[dict],
+    *,
+    cwd: Path,
+    provider: str | None,
+) -> list[dict]:
+    if not candidates:
+        return []
+    ordered = sorted(
+        candidates,
+        key=lambda item: (int(item["page_number"]), str(item["pair_id"])),
+    )
+    max_pairs = fragment_merge_request_max_pairs()
+    requests: list[dict] = []
+    for start in range(0, len(ordered), max_pairs):
+        chunk = ordered[start : start + max_pairs]
+        requests.append(
+            build_fragment_merge_request(
+                chunk,
+                cwd=cwd,
+                provider=provider,
+                request_index=len(requests) + 1,
+            )
+        )
+    return requests
 
 
 def parse_fragment_merge_response_entry(entry: dict) -> dict[str, bool]:
@@ -1715,10 +1914,8 @@ def collect_fragment_merge_candidates(
     return candidates, cached_yes_decisions, candidate_keys
 
 
-def llm_fragment_merge_decisions(
+def resolve_fragment_merge_pairs(
     page_blocks: list[dict],
-    cwd: Path,
-    provider: str | None = None,
     provided_pair_decisions: dict[str, bool] | None = None,
 ) -> tuple[set[tuple[str, str]], list[dict]]:
     if not llm_fragment_merge_enabled():
@@ -1740,16 +1937,24 @@ def llm_fragment_merge_decisions(
         _FRAGMENT_MERGE_LLM_CACHE[candidate["cache_key"]] = result
         if result:
             decisions.add(candidate_keys[candidate["pair_id"]])
-    requests = []
-    if unresolved_candidates:
-        requests.append(
-            build_fragment_merge_request(
-                unresolved_candidates,
-                cwd=cwd,
-                provider=provider,
-            )
-        )
-    return decisions, requests
+    return decisions, unresolved_candidates
+
+
+def llm_fragment_merge_decisions(
+    page_blocks: list[dict],
+    cwd: Path,
+    provider: str | None = None,
+    provided_pair_decisions: dict[str, bool] | None = None,
+) -> tuple[set[tuple[str, str]], list[dict]]:
+    decisions, unresolved_candidates = resolve_fragment_merge_pairs(
+        page_blocks,
+        provided_pair_decisions=provided_pair_decisions,
+    )
+    return decisions, build_fragment_merge_requests(
+        unresolved_candidates,
+        cwd=cwd,
+        provider=provider,
+    )
 
 
 def dedupe_ocr_blocks(page_blocks: list[dict]) -> list[dict]:
@@ -1895,32 +2100,74 @@ def score_cell_ocr_text(text: str) -> tuple[int, int, int]:
     return (label_count, len(lines), score)
 
 
-def best_text_from_top_crop(
-    image: Image.Image,
-    cell_rect: fitz.Rect,
+def page_ocr_lines(
+    image: PILImage,
     page_rect: fitz.Rect,
-    current_text: str,
-) -> str:
+    *,
+    psm: str = "6",
+) -> list[dict]:
     width, height = image.size
-    candidates = [normalize_cell_ocr_text(current_text)]
-    fractions = (0.28, 0.34)
-    for fraction in fractions:
-        x0 = max(0, page_pt_to_px(cell_rect.x0, page_rect.width, width) + 8)
-        x1 = min(width, page_pt_to_px(cell_rect.x1, page_rect.width, width) - 8)
-        y0 = max(0, page_pt_to_px(cell_rect.y0, page_rect.height, height) + 8)
-        y1 = min(
-            height,
-            page_pt_to_px(
-                cell_rect.y0 + cell_rect.height * fraction, page_rect.height, height
-            ),
-        )
-        if x1 - x0 < 16 or y1 - y0 < 16:
+    extracted = []
+    for line in ocr_image_to_lines(image.convert("RGB"), psm=psm):
+        text = normalize_cell_ocr_text(str(line.get("text", "")))
+        bbox_px = tuple(float(value) for value in line.get("bbox_px", [])[:4])
+        if not text or len(bbox_px) != 4:
             continue
-        candidate = normalize_cell_ocr_text(
-            ocr_image_to_string(
-                image.crop((x0, y0, x1, y1)),
-                psm="6",
-            )
+        extracted.append(
+            {
+                "text": text,
+                "bbox": [
+                    round(page_px_to_pt(bbox_px[0], width, page_rect.width), 2),
+                    round(page_px_to_pt(bbox_px[1], height, page_rect.height), 2),
+                    round(page_px_to_pt(bbox_px[2], width, page_rect.width), 2),
+                    round(page_px_to_pt(bbox_px[3], height, page_rect.height), 2),
+                ],
+            }
+        )
+    extracted.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+    return extracted
+
+
+def cell_ocr_text_from_page_lines(
+    cell_rect: fitz.Rect,
+    ocr_lines: list[dict],
+    *,
+    top_fraction: float | None = None,
+) -> str:
+    target_rect = cell_rect
+    if top_fraction is not None:
+        target_rect = fitz.Rect(
+            cell_rect.x0,
+            cell_rect.y0,
+            cell_rect.x1,
+            cell_rect.y0 + cell_rect.height * top_fraction,
+        )
+    texts: list[str] = []
+    for line in ocr_lines:
+        line_rect = fitz.Rect(line["bbox"])
+        if (line_rect & target_rect).is_empty:
+            continue
+        center = fitz.Point(
+            (line_rect.x0 + line_rect.x1) / 2,
+            (line_rect.y0 + line_rect.y1) / 2,
+        )
+        if not target_rect.contains(center) and (line_rect & target_rect).get_area() < line_rect.get_area() * 0.5:
+            continue
+        texts.append(str(line["text"]))
+    return normalize_cell_ocr_text("\n".join(texts))
+
+
+def best_text_from_top_lines(
+    cell_rect: fitz.Rect,
+    current_text: str,
+    ocr_lines: list[dict],
+) -> str:
+    candidates = [normalize_cell_ocr_text(current_text)]
+    for fraction in (0.28, 0.34):
+        candidate = cell_ocr_text_from_page_lines(
+            cell_rect,
+            ocr_lines,
+            top_fraction=fraction,
         )
         if candidate:
             candidates.append(candidate)
@@ -1970,14 +2217,14 @@ def trim_to_content(
 
 
 def extract_signature_crops(
-    render_path: Path,
+    render_image: PILImage,
     page_number: int,
     page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
     assets_dir: Path,
 ) -> list[dict]:
-    image = Image.open(render_path).convert("RGB")
+    image = render_image.convert("RGB")
     width, height = image.size
     block_by_id = {block["id"]: block for block in page_blocks}
     exported: list[dict] = []
@@ -2053,30 +2300,20 @@ def extract_signature_crops(
 
 
 def fill_empty_cells_with_ocr(
-    render_path: Path,
     page_number: int,
-    page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
+    ocr_lines: list[dict],
 ) -> None:
-    image = Image.open(render_path).convert("RGB")
-    width, height = image.size
     next_index = len(page_blocks) + 1
     for table in tables:
         for cell in table["cells"]:
             if cell["block_ids"]:
                 continue
             cell_rect = fitz.Rect(cell["bbox"])
-            x0 = max(0, page_pt_to_px(cell_rect.x0, page_rect.width, width) + 4)
-            x1 = min(width, page_pt_to_px(cell_rect.x1, page_rect.width, width) - 4)
-            y0 = max(0, page_pt_to_px(cell_rect.y0, page_rect.height, height) + 4)
-            y1 = min(height, page_pt_to_px(cell_rect.y1, page_rect.height, height) - 4)
-            if x1 - x0 < 16 or y1 - y0 < 16:
-                continue
-            cropped = image.crop((x0, y0, x1, y1))
-            extracted = ocr_image_to_string(
-                cropped,
-                psm="6",
+            extracted = cell_ocr_text_from_page_lines(
+                cell_rect,
+                ocr_lines,
             )
             if not extracted or is_probable_artifact(extracted):
                 continue
@@ -2114,12 +2351,10 @@ def fill_empty_cells_with_ocr(
 
 
 def enrich_tall_cells_with_ocr(
-    render_path: Path,
-    page_rect: fitz.Rect,
     tables: list[dict],
     page_blocks: list[dict],
+    ocr_lines: list[dict],
 ) -> None:
-    image = Image.open(render_path).convert("RGB")
     blocks_by_id = {block["id"]: block for block in page_blocks}
     for table in tables:
         for cell in table["cells"]:
@@ -2132,11 +2367,10 @@ def enrich_tall_cells_with_ocr(
             if block is None:
                 continue
             current_text = str(block.get("text", ""))
-            enriched = best_text_from_top_crop(
-                image,
+            enriched = best_text_from_top_lines(
                 cell_rect,
-                page_rect,
                 current_text,
+                ocr_lines,
             )
             if score_cell_ocr_text(enriched) > score_cell_ocr_text(current_text):
                 block["text"] = enriched
@@ -2203,10 +2437,14 @@ def main() -> int:
             "pages": args.pages,
             "dpi": args.dpi,
             "magnify_factor": args.magnify_factor,
+            "write_page_renders": bool(args.write_page_renders),
         },
     )
     assets_dir = output_dir / "assets"
     renders_dir = output_dir / "page-renders"
+    blocks_json_path = output_dir / "blocks.json"
+    source_md_path = output_dir / "source.md"
+    run_manifest_path = output_dir / "run-manifest.json"
     fragment_merge_requests_path = (
         Path(args.fragment_merge_requests_json).expanduser().resolve()
         if args.fragment_merge_requests_json
@@ -2217,24 +2455,37 @@ def main() -> int:
         if args.fragment_merge_responses_json
         else None
     )
+    fragment_merge_review_enabled = (
+        fragment_merge_requests_path is not None
+        or fragment_merge_responses_path is not None
+    )
     try:
         with profiler.stage("prepare_output_dirs", output_dir=output_dir):
             output_dir.mkdir(parents=True, exist_ok=True)
             assets_dir.mkdir(parents=True, exist_ok=True)
-            renders_dir.mkdir(parents=True, exist_ok=True)
+            if args.write_page_renders:
+                renders_dir.mkdir(parents=True, exist_ok=True)
 
         with profiler.stage("open_input_pdf", path=input_pdf):
             doc = fitz.open(input_pdf)
+        with profiler.stage("hash_input_pdf", path=input_pdf):
+            document_hash = sha256_file(input_pdf)
         selected = parse_page_selection(args.pages, doc.page_count)
         profiler.set_counter("selected_pages", len(selected))
         with profiler.stage("load_fragment_merge_decisions"):
             provided_fragment_merge_decisions = load_fragment_merge_pair_decisions(
                 fragment_merge_responses_path
             )
+        with profiler.stage("load_previous_extract_outputs"):
+            previous_payload = (
+                json.loads(blocks_json_path.read_text())
+                if blocks_json_path.exists()
+                else {}
+            )
         all_blocks = []
         all_assets = []
         pages_payload = []
-        fragment_merge_requests = []
+        fragment_merge_candidates = []
         markdown_lines = [f"# Source Text: {input_pdf.name}", ""]
 
         for page_index in range(doc.page_count):
@@ -2243,34 +2494,100 @@ def main() -> int:
                 continue
             page = doc[page_index]
             with profiler.stage("extract_page", page_number=page_number) as page_span:
+                render_path = (
+                    renders_dir / f"page-{page_number:03d}.png"
+                    if args.write_page_renders
+                    else None
+                )
+                render_cache = PageRenderCache(page, args.dpi, render_path=render_path)
+                with profiler.stage("fingerprint_page_source", page_number=page_number):
+                    source_fingerprint = page_source_fingerprint(page)
+                previous_page = next(
+                    (
+                        candidate
+                        for candidate in previous_payload.get("pages", [])
+                        if int(candidate.get("page_number", 0) or 0) == page_number
+                    ),
+                    None,
+                )
+                previous_page_assets = previous_assets_for_page(previous_payload, page_number)
+                if can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint=source_fingerprint,
+                    previous_page_assets=previous_page_assets,
+                    write_page_renders=bool(args.write_page_renders),
+                ):
+                    page_blocks = previous_blocks_for_page(previous_payload, page_number)
+                    page_tables = deepcopy(previous_page.get("tables", [])) if previous_page else []
+                    signature_assets = [
+                        deepcopy(asset)
+                        for asset in previous_page_assets
+                        if asset.get("kind") == "signature_crop"
+                    ]
+                    page_assets = previous_page_assets
+                    page_asset_ids = list(previous_page.get("asset_ids", [])) if previous_page else []
+                    strategy_hint = str(previous_page.get("strategy_hint", "overlay")) if previous_page else "overlay"
+                    page_payload = deepcopy(previous_page) if previous_page else {
+                        "page_number": page_number,
+                    }
+                    page_payload["source_fingerprint"] = source_fingerprint
+                    if render_path is None:
+                        page_payload["render_path"] = None
+                    elif page_payload.get("render_path") is None:
+                        page_payload["render_path"] = str(render_path)
+                    all_assets.extend(page_assets)
+                    all_blocks.extend(page_blocks)
+                    pages_payload.append(page_payload)
+                    extend_markdown_for_page(markdown_lines, page_number, page_blocks)
+                    page_span.set(
+                        page_type=page_payload.get("page_type"),
+                        region_source=page_payload.get("region_source"),
+                        block_count=len(page_blocks),
+                        table_count=len(page_tables),
+                        asset_count=len(page_asset_ids),
+                        signature_asset_count=len(signature_assets),
+                        fragment_merge_candidate_count=0,
+                        strategy_hint=strategy_hint,
+                        reused_cached_page=True,
+                        render_path_written=bool(render_path and render_path.exists()),
+                    )
+                    profiler.increment_counter("reused_extract_pages")
+                    continue
                 with profiler.stage("classify_page", page_number=page_number):
                     page_type, region_source = classify_page(page)
                     effective_region_source = (
                         region_source if region_source == "native" else "ocr_tesseract"
                     )
                 with profiler.stage("extract_regions", page_number=page_number, region_source=region_source):
-                    regions = (
-                        extract_native_regions(page)
-                        if region_source == "native"
-                        else extract_ocr_regions(
-                            page, args.magnify_factor if region_source == "ocr" else 1.0
+                    if region_source == "native":
+                        regions = extract_native_regions(page)
+                    else:
+                        ocr_magnify_factor = (
+                            args.magnify_factor if region_source == "ocr" else 1.0
                         )
-                    )
+                        with profiler.stage(
+                            "render_ocr_page_image",
+                            page_number=page_number,
+                            magnify_factor=ocr_magnify_factor,
+                        ):
+                            ocr_image, ocr_scale = ocr_page_image(
+                                page,
+                                magnify_factor=ocr_magnify_factor,
+                            )
+                        regions = extract_ocr_regions(
+                            page,
+                            ocr_magnify_factor,
+                            ocr_image=ocr_image,
+                            ocr_scale=ocr_scale,
+                        )
                     regions = [region for region in regions if clean_text(region.text)]
                     merged = merge_regions(regions)
-
-                with profiler.stage("render_page_png", page_number=page_number, dpi=args.dpi):
-                    pix = page.get_pixmap(dpi=args.dpi, alpha=False)
-                    render_path = renders_dir / f"page-{page_number:03d}.png"
-                    render_path.write_bytes(pix.tobytes("png"))
 
                 with profiler.stage("export_page_assets", page_number=page_number):
                     page_assets = export_page_assets(page, page_number, assets_dir)
                 page_blocks = []
 
                 with profiler.stage("build_page_blocks", page_number=page_number, merged_region_count=len(merged)):
-                    markdown_lines.append(f"## Page {page_number}")
-                    markdown_lines.append("")
                     for block_index, block in enumerate(merged, 1):
                         block_text = block_text_from_regions(block["regions"])
                         if not block_text:
@@ -2311,8 +2628,6 @@ def main() -> int:
                             "table": None,
                         }
                         page_blocks.append(payload)
-                        markdown_lines.append(block_text)
-                        markdown_lines.append("")
 
                 with profiler.stage("detect_and_fill_tables", page_number=page_number) as table_span:
                     skipped_ruled_table_detection = should_skip_ruled_table_detection(
@@ -2324,38 +2639,59 @@ def main() -> int:
                     if skipped_ruled_table_detection:
                         page_tables = []
                     else:
-                        page_tables = detect_tables(render_path, page.rect)
+                        with profiler.stage(
+                            "render_layout_page_image",
+                            page_number=page_number,
+                            dpi=args.dpi,
+                        ):
+                            layout_image = render_cache.layout_image()
+                        if args.write_page_renders:
+                            with profiler.stage(
+                                "write_page_png_artifact",
+                                page_number=page_number,
+                                path=render_path,
+                            ):
+                                render_cache.write_layout_render()
+                        page_tables = detect_tables(layout_image, page.rect)
                         for table in page_tables:
                             table["id"] = f"p{page_number}-{table['id']}"
                             table["page_number"] = page_number
                             table["cells"] = build_table_cells(page_number, table)
                         assign_blocks_to_tables(page_blocks, page_tables)
+                        if page_tables:
+                            with profiler.stage(
+                                "ocr_table_page_lines",
+                                page_number=page_number,
+                            ):
+                                table_ocr_lines = page_ocr_lines(layout_image, page.rect)
+                        else:
+                            table_ocr_lines = []
                         fill_empty_cells_with_ocr(
-                            render_path,
                             page_number,
-                            page.rect,
                             page_tables,
                             page_blocks,
+                            table_ocr_lines,
                         )
                         enrich_tall_cells_with_ocr(
-                            render_path,
-                            page.rect,
                             page_tables,
                             page_blocks,
+                            table_ocr_lines,
                         )
 
                 with profiler.stage("merge_fragments", page_number=page_number):
                     page_blocks = attach_leading_bullets(page_blocks)
                     page_blocks = merge_inline_row_fragments(page_blocks)
-                    fragment_merge_pairs, page_fragment_merge_requests = (
-                        llm_fragment_merge_decisions(
-                            page_blocks,
-                            cwd=input_pdf.parent,
-                            provider=args.translation_provider,
-                            provided_pair_decisions=provided_fragment_merge_decisions,
+                    if fragment_merge_review_enabled:
+                        fragment_merge_pairs, page_fragment_merge_candidates = (
+                            resolve_fragment_merge_pairs(
+                                page_blocks,
+                                provided_pair_decisions=provided_fragment_merge_decisions,
+                            )
                         )
-                    )
-                    fragment_merge_requests.extend(page_fragment_merge_requests)
+                    else:
+                        fragment_merge_pairs = set()
+                        page_fragment_merge_candidates = []
+                    fragment_merge_candidates.extend(page_fragment_merge_candidates)
                     page_blocks = merge_paragraph_fragments(
                         page_blocks,
                         fragment_merge_pairs,
@@ -2380,9 +2716,30 @@ def main() -> int:
                             continue
                         block["text"] = normalize_cell_ocr_text(str(block.get("text", "")))
                     finalize_block_layout(page_blocks, page.rect)
-                    signature_assets = extract_signature_crops(
-                        render_path, page_number, page.rect, page_tables, page_blocks, assets_dir
-                    )
+                    stamp_block_fingerprints(page_blocks)
+                    signature_assets = []
+                    if page_tables:
+                        with profiler.stage(
+                            "render_layout_page_image",
+                            page_number=page_number,
+                            dpi=args.dpi,
+                        ):
+                            layout_image = render_cache.layout_image()
+                        if args.write_page_renders:
+                            with profiler.stage(
+                                "write_page_png_artifact",
+                                page_number=page_number,
+                                path=render_path,
+                            ):
+                                render_cache.write_layout_render()
+                        signature_assets = extract_signature_crops(
+                            layout_image,
+                            page_number,
+                            page.rect,
+                            page_tables,
+                            page_blocks,
+                            assets_dir,
+                        )
 
                 for table in page_tables:
                     for cell in table["cells"]:
@@ -2413,11 +2770,13 @@ def main() -> int:
                         "strategy_hint": strategy_hint,
                         "width": round(page.rect.width, 2),
                         "height": round(page.rect.height, 2),
-                        "render_path": str(render_path),
+                        "source_fingerprint": source_fingerprint,
+                        "render_path": str(render_path) if render_path is not None else None,
                         "asset_ids": page_asset_ids,
                         "tables": page_tables,
                     }
                 )
+                extend_markdown_for_page(markdown_lines, page_number, page_blocks)
                 page_span.set(
                     page_type=page_type,
                     region_source=effective_region_source,
@@ -2425,12 +2784,24 @@ def main() -> int:
                     table_count=len(page_tables),
                     asset_count=len(page_asset_ids),
                     signature_asset_count=len(signature_assets),
-                    fragment_merge_request_count=len(page_fragment_merge_requests),
+                    fragment_merge_candidate_count=len(page_fragment_merge_candidates),
                     strategy_hint=strategy_hint,
+                    render_path_written=bool(render_path and render_path.exists()),
                 )
 
         with profiler.stage("mark_repeated_headers_and_footers"):
             mark_repeated_headers_and_footers(all_blocks, pages_payload)
+
+        with profiler.stage("build_fragment_merge_requests"):
+            fragment_merge_requests = (
+                build_fragment_merge_requests(
+                    fragment_merge_candidates,
+                    cwd=input_pdf.parent,
+                    provider=args.translation_provider,
+                )
+                if fragment_merge_review_enabled
+                else []
+            )
 
         if args.font_baseline:
             family_class = normalize_font_family_class(args.font_baseline)
@@ -2446,6 +2817,7 @@ def main() -> int:
 
         payload = {
             "input_pdf": str(input_pdf),
+            "document_hash": document_hash,
             "page_count": len(pages_payload),
             "block_count": len(all_blocks),
             "font_baseline": font_baseline,
@@ -2482,15 +2854,34 @@ def main() -> int:
             payload["fragment_merge_responses_json"] = str(fragment_merge_responses_path)
             payload["fragment_merge_decision_count"] = len(provided_fragment_merge_decisions)
         with profiler.stage("write_outputs", output_dir=output_dir):
-            (output_dir / "source.md").write_text("\n".join(markdown_lines))
-            (output_dir / "blocks.json").write_text(
+            source_md_path.write_text("\n".join(markdown_lines))
+            blocks_json_path.write_text(
                 json.dumps(payload, indent=2, ensure_ascii=False)
             )
-        print(output_dir / "source.md")
-        print(output_dir / "blocks.json")
+            update_run_manifest(
+                run_manifest_path,
+                {
+                    "input_pdf": str(input_pdf),
+                    "document_hash": document_hash,
+                    "selected_pages": sorted(selected),
+                    "extract": {
+                        "output_dir": str(output_dir),
+                        "source_md": str(source_md_path),
+                        "blocks_json": str(blocks_json_path),
+                        "assets_dir": str(assets_dir),
+                        "page_source_fingerprints": {
+                            str(page["page_number"]): str(page.get("source_fingerprint", ""))
+                            for page in pages_payload
+                        },
+                    },
+                },
+            )
+        print(source_md_path)
+        print(blocks_json_path)
         if fragment_merge_requests_path is not None:
             print(fragment_merge_requests_path)
         print(assets_dir)
+        print(run_manifest_path)
         profiler.finish(status="ok")
         doc.close()
         return 0

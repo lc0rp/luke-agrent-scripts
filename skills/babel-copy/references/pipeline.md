@@ -17,6 +17,7 @@ Outputs:
 - `assets/`
 
 Do not skip preview renders. Render representative pages early and choose handling strategy from what you see, not from file type alone.
+Persist page PNGs only when QA or operator review needs saved artifacts. Otherwise an in-memory page render is sufficient for extraction-time table, cell, and signature work.
 
 Choose a document-level `font_baseline` from those preview renders before you trust extracted font metadata. Classify the visual body face as `serif` or `sans`, store it in the payload, and prefer that visual decision whenever the source font is missing, weak, or not embedded.
 
@@ -137,6 +138,11 @@ Automation-oriented runs should also emit a `run-manifest.json` with enough meta
 - `document_id` when supplied
 - `cycle_id` when supplied
 - `run_label` when supplied
+- `document_hash`
+- per-page extraction fingerprints
+- per-page or per-chunk render fingerprints for cached final-build artifacts
+
+When a rerun targets the same output directory, use those fingerprints to reuse unchanged extraction pages, skip translation requests for unchanged blocks with cached translations, and reload unchanged rendered pages or contiguous rebuild chunks from cache.
 
 If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through structured rebuild first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
 

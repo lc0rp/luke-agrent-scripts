@@ -561,8 +561,16 @@ def ocr_image_to_string(
 def extract_ocr_regions(
     page: fitz.Page,
     magnify_factor: float,
+    *,
+    ocr_image: Image.Image | None = None,
+    ocr_scale: float | None = None,
 ) -> list[TextRegion]:
-    image, scale = ocr_page_image(page, magnify_factor=magnify_factor)
+    if (ocr_image is None) != (ocr_scale is None):
+        raise ValueError("ocr_image and ocr_scale must be provided together.")
+    if ocr_image is None or ocr_scale is None:
+        image, scale = ocr_page_image(page, magnify_factor=magnify_factor)
+    else:
+        image, scale = ocr_image, ocr_scale
     lines = ocr_image_to_lines(image)
     regions: list[TextRegion] = []
     for line in lines:

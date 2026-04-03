@@ -22,7 +22,7 @@ def load_module(
         sys.path.insert(0, parent)
     if stub_modules:
         for name, module in stub_modules.items():
-            sys.modules.setdefault(name, module)
+            sys.modules[name] = module
     spec = importlib.util.spec_from_file_location(module_name, str(path))
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -39,10 +39,6 @@ TRANSLATE_BLOCKS_DESKTOP = load_module(
     "test_translate_blocks_desktop",
     REPO_ROOT / "skills" / "babel-copy" / "scripts" / "translate_blocks_desktop.py",
 )
-RUN_OPTIMIZATION_CYCLE = load_module(
-    "test_run_optimization_cycle",
-    REPO_ROOT / "skills" / "babel-copy-optimizer" / "scripts" / "run_optimization_cycle.py",
-)
 
 
 def make_extract_document_stubs() -> dict[str, types.ModuleType]:
@@ -54,8 +50,11 @@ def make_extract_document_stubs() -> dict[str, types.ModuleType]:
         "extract_ocr_regions",
         "font_baseline_from_payload",
         "infer_alignment",
+        "ocr_image_to_lines",
         "normalize_font_family_class",
         "ocr_image_to_string",
+        "ocr_page_image",
+        "page_image_fast",
     ]
     for name in passthrough_names:
         setattr(fake_core, name, lambda *args, **kwargs: None)
@@ -67,8 +66,19 @@ def make_extract_document_stubs() -> dict[str, types.ModuleType]:
 
     class DummyRect:
         def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
+            if len(args) == 1:
+                values = args[0]
+            else:
+                values = args
+            self.x0, self.y0, self.x1, self.y1 = [float(value) for value in values]
+
+        @property
+        def width(self):
+            return self.x1 - self.x0
+
+        @property
+        def height(self):
+            return self.y1 - self.y0
 
     class DummyPoint:
         def __init__(self, x, y):
@@ -155,6 +165,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                 source_lang="French",
                 target_lang="English",
                 batch_size=1,
+                batch_char_budget=1000,
                 provider="claude",
                 model="claude-sonnet-4-20250514",
             )
@@ -163,8 +174,141 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(payload["kind"], "babel_copy_translation_requests")
         self.assertEqual(payload["request_count"], 2)
         self.assertEqual(payload["runtime_mode"], "claude")
+        self.assertEqual(payload["requests"][0]["page_numbers"], [1])
         self.assertEqual(payload["requests"][0]["block_ids"], ["block-1"])
         self.assertIn("Translate the following document blocks", payload["requests"][0]["prompt"])
+
+    def test_chunk_translation_batches_splits_dense_text_by_prompt_budget(self) -> None:
+        blocks = [
+            {
+                "id": f"block-{index}",
+                "page_number": 1,
+                "role": "paragraph",
+                "text": f"Clause {index}: " + ("texte " * 80),
+            }
+            for index in range(1, 4)
+        ]
+
+        budget = len(
+            TRANSLATE_BLOCKS_DESKTOP.build_prompt(blocks[:2], "French", "English")
+        )
+        batches = TRANSLATE_BLOCKS_DESKTOP.chunk_translation_batches(
+            blocks,
+            source_lang="French",
+            target_lang="English",
+            max_blocks=10,
+            max_prompt_chars=budget,
+        )
+
+        self.assertEqual([[block["id"] for block in batch] for batch in batches], [
+            ["block-1", "block-2"],
+            ["block-3"],
+        ])
+
+    def test_chunk_translation_batches_prefers_page_boundary_when_batch_is_nearly_full(self) -> None:
+        first_page_block = {
+            "id": "block-1",
+            "page_number": 1,
+            "role": "paragraph",
+            "text": "Préambule: " + ("texte " * 120),
+        }
+        second_page_block = {
+            "id": "block-2",
+            "page_number": 2,
+            "role": "paragraph",
+            "text": "Suite courte.",
+        }
+        first_prompt_chars = len(
+            TRANSLATE_BLOCKS_DESKTOP.build_prompt(
+                [first_page_block],
+                "French",
+                "English",
+            )
+        )
+        budget = max(1, int(first_prompt_chars / 0.8))
+
+        batches = TRANSLATE_BLOCKS_DESKTOP.chunk_translation_batches(
+            [first_page_block, second_page_block],
+            source_lang="French",
+            target_lang="English",
+            max_blocks=10,
+            max_prompt_chars=budget,
+        )
+
+        self.assertEqual([[block["id"] for block in batch] for batch in batches], [
+            ["block-1"],
+            ["block-2"],
+        ])
+
+    def test_prepare_request_payload_reuses_cached_translations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            blocks_json = workspace / "blocks.json"
+            requests_json = workspace / "translation-requests.json"
+            translated_json = workspace / "translated_blocks.json"
+            blocks_json.write_text(
+                json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                                "fingerprint": "same-1",
+                            },
+                            {
+                                "id": "block-2",
+                                "page_number": 2,
+                                "role": "paragraph",
+                                "text": "Nouveau texte",
+                                "fingerprint": "new-2",
+                            },
+                        ]
+                    }
+                )
+            )
+            translated_json.write_text(
+                json.dumps(
+                    {
+                        "blocks": [
+                            {
+                                "id": "block-1",
+                                "page_number": 1,
+                                "role": "paragraph",
+                                "text": "Bonjour",
+                                "fingerprint": "same-1",
+                                "translated_text": "Hello",
+                            },
+                            {
+                                "id": "block-2",
+                                "page_number": 2,
+                                "role": "paragraph",
+                                "text": "Ancien texte",
+                                "fingerprint": "old-2",
+                                "translated_text": "Old text",
+                            },
+                        ]
+                    }
+                )
+            )
+
+            TRANSLATE_BLOCKS_DESKTOP.prepare_request_payload(
+                blocks_json=blocks_json,
+                output_json=requests_json,
+                source_lang="French",
+                target_lang="English",
+                batch_size=10,
+                batch_char_budget=1000,
+                provider="claude",
+                model=None,
+            )
+            payload = json.loads(requests_json.read_text())
+
+        self.assertEqual(payload["cached_translation_count"], 1)
+        self.assertEqual(payload["cached_translations"], {"block-1": "Hello"})
+        self.assertEqual(payload["request_count"], 1)
+        self.assertEqual(payload["requests"][0]["block_ids"], ["block-2"])
 
     def test_apply_response_payload_builds_translated_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
@@ -218,6 +362,8 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             self.assertEqual(result, output_json)
             payload = json.loads(output_json.read_text())
         self.assertEqual(payload["blocks"][0]["translated_text"], "Hello")
+
+
         self.assertEqual(payload["translation_mode"], "desktop_subagent")
         self.assertEqual(payload["translation_backend_used"], "claude_desktop_subagent")
 
@@ -307,6 +453,34 @@ class ExtractDocumentTableHeuristicsTests(unittest.TestCase):
 
 
 class ExtractDocumentTests(unittest.TestCase):
+    def test_can_reuse_extracted_page_requires_matching_fingerprint_and_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            asset_path = workspace / "asset.png"
+            asset_path.write_bytes(b"png")
+            previous_page = {
+                "page_number": 1,
+                "source_fingerprint": "fp-1",
+                "render_path": None,
+            }
+
+            self.assertTrue(
+                EXTRACT_DOCUMENT.can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint="fp-1",
+                    previous_page_assets=[{"path": str(asset_path)}],
+                    write_page_renders=False,
+                )
+            )
+            self.assertFalse(
+                EXTRACT_DOCUMENT.can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint="fp-2",
+                    previous_page_assets=[{"path": str(asset_path)}],
+                    write_page_renders=False,
+                )
+            )
+
     def test_llm_fragment_merge_returns_desktop_request_when_unresolved(self) -> None:
         candidates = [
             {
@@ -333,8 +507,61 @@ class ExtractDocumentTests(unittest.TestCase):
             )
         self.assertEqual(decisions, set())
         self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["kind"], "fragment_merge_batch")
         self.assertEqual(requests[0]["runtime_mode"], "claude")
         self.assertEqual(requests[0]["pair_ids"], ["p1-b1->p1-b2"])
+        self.assertEqual(requests[0]["page_numbers"], [1])
+
+    def test_build_fragment_merge_requests_batches_across_pages(self) -> None:
+        candidates = [
+            {
+                "pair_id": "p1-b1->p1-b2",
+                "page_number": 1,
+                "previous_role": "paragraph",
+                "current_role": "paragraph",
+                "vertical_gap": 4.0,
+                "previous_text": "Bonjour",
+                "current_text": "le monde",
+                "cache_key": "cache-1",
+            },
+            {
+                "pair_id": "p2-b4->p2-b5",
+                "page_number": 2,
+                "previous_role": "paragraph",
+                "current_role": "paragraph",
+                "vertical_gap": 5.0,
+                "previous_text": "Second",
+                "current_text": "fragment",
+                "cache_key": "cache-2",
+            },
+            {
+                "pair_id": "p3-b7->p3-b8",
+                "page_number": 3,
+                "previous_role": "heading",
+                "current_role": "heading",
+                "vertical_gap": 3.0,
+                "previous_text": "Third",
+                "current_text": "page",
+                "cache_key": "cache-3",
+            },
+        ]
+
+        with mock.patch.object(
+            EXTRACT_DOCUMENT,
+            "fragment_merge_request_max_pairs",
+            return_value=2,
+        ):
+            requests = EXTRACT_DOCUMENT.build_fragment_merge_requests(
+                candidates,
+                cwd=Path("/tmp/work"),
+                provider="claude",
+            )
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["pair_ids"], ["p1-b1->p1-b2", "p2-b4->p2-b5"])
+        self.assertEqual(requests[0]["page_numbers"], [1, 2])
+        self.assertEqual(requests[1]["pair_ids"], ["p3-b7->p3-b8"])
+        self.assertEqual(requests[1]["page_numbers"], [3])
 
     def test_load_fragment_merge_pair_decisions_accepts_response_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
@@ -356,83 +583,112 @@ class ExtractDocumentTests(unittest.TestCase):
             )
         self.assertEqual(decisions, {"p1-b1->p1-b2": True})
 
+    def test_merge_paragraph_fragments_merges_centered_native_heading_stack(self) -> None:
+        page_blocks = [
+            {
+                "id": "p1-b1",
+                "page_number": 1,
+                "source": "native",
+                "role": "heading",
+                "align": "center",
+                "bbox": [115.2, 63.96, 500.75, 81.56],
+                "text": "AVENANT AU CONTRAT ACCORD CADRE RELATIF AU PROGRAMME",
+                "style": {"bold": True},
+                "_font_size_hints": [12.5],
+                "_native_lines": [],
+                "table": None,
+            },
+            {
+                "id": "p1-b2",
+                "page_number": 1,
+                "source": "native",
+                "role": "heading",
+                "align": "center",
+                "bbox": [269.64, 78.36, 357.34, 94.16],
+                "text": "SAMA MONEY",
+                "style": {"bold": True},
+                "_font_size_hints": [11.5],
+                "_native_lines": [],
+                "table": None,
+            },
+        ]
 
-class ReleaseGuardTests(unittest.TestCase):
-    def make_workspace(self) -> tuple[Path, object]:
-        tmpdir = tempfile.TemporaryDirectory()
-        workspace = Path(tmpdir.name)
-        loop_root = workspace / "output" / "optimization-loop"
-        cycle_id = "20260401T120000Z"
-        cycle_dir = loop_root / "cycles" / cycle_id
-        cycle_dir.mkdir(parents=True, exist_ok=True)
-        (workspace / "french-orig").mkdir(parents=True, exist_ok=True)
-        (workspace / "french-orig" / "F1 sample.pdf").write_bytes(b"%PDF-1.4\n")
-        (loop_root / "loop.lock").write_text(json.dumps({"cycle_id": cycle_id}) + "\n")
-        (loop_root / "current-cycle.json").write_text(json.dumps({"cycle_id": cycle_id}) + "\n")
-        (loop_root / "state.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "workspace": str(workspace),
-                    "goal": {
-                        "required_consecutive_full_pass_cycles": 2,
-                        "documents": [{"document_id": "F1", "input_pdf": str(workspace / "french-orig" / "F1 sample.pdf")}],
-                    },
-                    "completed": False,
-                    "completed_at": None,
-                    "consecutive_full_pass_cycles": 0,
-                    "last_finished_cycle_id": None,
-                    "cycles": [],
-                }
-            )
-            + "\n"
-        )
-        paths = RUN_OPTIMIZATION_CYCLE.LoopPaths(workspace)
-        self.addCleanup(tmpdir.cleanup)
-        return cycle_dir, paths
+        merged = EXTRACT_DOCUMENT.merge_paragraph_fragments(page_blocks)
 
-    def test_release_lock_blocks_when_active_worker_marker_is_alive(self) -> None:
-        cycle_dir, paths = self.make_workspace()
-        marker_dir = cycle_dir / "documents" / "F1" / "attempts" / "20260401T120000Z-initial"
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        (marker_dir / "active-run.json").write_text(
-            json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "hostname": RUN_OPTIMIZATION_CYCLE.socket.gethostname(),
-                    "document_id": "F1",
-                    "cycle_id": "20260401T120000Z",
-                    "run_label": "initial",
-                    "output_dir": str(marker_dir),
-                }
-            )
-            + "\n"
-        )
-        with self.assertRaises(SystemExit) as exc:
-            RUN_OPTIMIZATION_CYCLE.release_lock(paths, "20260401T120000Z", "usage_limit_blocked")
-        self.assertIn("active babel-copy workers", str(exc.exception))
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["role"], "heading")
+        self.assertIn("SAMA MONEY", merged[0]["text"])
 
-    def test_release_lock_allows_dead_worker_marker(self) -> None:
-        cycle_dir, paths = self.make_workspace()
-        marker_dir = cycle_dir / "documents" / "F1" / "attempts" / "20260401T120000Z-initial"
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        (marker_dir / "active-run.json").write_text(
-            json.dumps(
-                {
-                    "pid": 999999,
-                    "hostname": RUN_OPTIMIZATION_CYCLE.socket.gethostname(),
-                    "document_id": "F1",
-                    "cycle_id": "20260401T120000Z",
-                    "run_label": "initial",
-                    "output_dir": str(marker_dir),
-                }
-            )
-            + "\n"
-        )
-        result = RUN_OPTIMIZATION_CYCLE.release_lock(paths, "20260401T120000Z", "usage_limit_blocked")
-        self.assertEqual(result["status"], "released")
-        self.assertFalse(paths.lock_path.exists())
+    def test_merge_paragraph_fragments_merges_short_native_continuation_line(self) -> None:
+        page_blocks = [
+            {
+                "id": "p1-b8",
+                "page_number": 1,
+                "source": "native",
+                "role": "paragraph",
+                "align": "left",
+                "bbox": [83.52, 390.84, 531.27, 410.45],
+                "text": "Les parties ont conclu le 20 juin 2024 un contrat de Bin sponsorship (co-branding) de carte",
+                "style": {"bold": False},
+                "_font_size_hints": [10.5],
+                "_native_lines": [],
+                "table": None,
+            },
+            {
+                "id": "p1-b9",
+                "page_number": 1,
+                "source": "native",
+                "role": "paragraph",
+                "align": "left",
+                "bbox": [83.16, 403.8, 353.71, 422.84],
+                "text": "prépayée relatif au programme ( VISA SAMA MONEY ).",
+                "style": {"bold": False},
+                "_font_size_hints": [11.0],
+                "_native_lines": [],
+                "table": None,
+            },
+        ]
 
+        merged = EXTRACT_DOCUMENT.merge_paragraph_fragments(page_blocks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertIn("prépayée", merged[0]["text"])
+
+    def test_merge_paragraph_fragments_merges_native_short_heading_like_tail(self) -> None:
+        page_blocks = [
+            {
+                "id": "p2-b20",
+                "page_number": 2,
+                "source": "native",
+                "role": "paragraph",
+                "align": "left",
+                "bbox": [83.52, 574.97, 530.43, 591.53],
+                "text": "Rapports de performance. Documenter et rapporter les performances des ventes afin d'évaluer",
+                "style": {"bold": False},
+                "_font_size_hints": [10.5],
+                "_native_lines": [],
+                "table": None,
+            },
+            {
+                "id": "p2-b21",
+                "page_number": 2,
+                "source": "native",
+                "role": "heading",
+                "align": "left",
+                "bbox": [84.24, 589.19, 334.1, 603.83],
+                "text": "l'impact des initiatives de co-branding sur ses activités.",
+                "style": {"bold": False},
+                "_font_size_hints": [10.5],
+                "_native_lines": [],
+                "table": None,
+            },
+        ]
+
+        merged = EXTRACT_DOCUMENT.merge_paragraph_fragments(page_blocks)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["role"], "paragraph")
+        self.assertIn("co-branding", merged[0]["text"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,8 @@ Use this skill when the translated document should read like a proper target-lan
   - translated text in Markdown or JSON blocks
   - rebuilt rich-layout source, preferably `.typ`
   - QA renders and notes
-  - `run-manifest.json` with canonical artifact paths for the current translation run
+- `run-manifest.json` with canonical artifact paths for the current translation run
+- include `document_hash` plus per-page extraction and build fingerprints in that manifest so reruns can reuse unchanged extraction, translation, and rebuild artifacts
 
 ## Core Rule
 
@@ -175,6 +176,7 @@ Run it to create:
 - `blocks.json`
 - `assets/`
 - page renders for QA and fallback composition
+  - these are optional artifacts; request them with `uv run --script scripts/extract_document.py --write-page-renders ...` when visual QA or manual inspection needs saved PNGs
 - `font_baseline` metadata for later fallback-font decisions
 
 OCR backend options:
@@ -211,12 +213,20 @@ Desktop translation flow for Codex Desktop or Claude Desktop:
 3. collect the JSON-only subagent replies into `translation-responses.json`
 4. run `uv run --script scripts/translate_blocks_desktop.py apply-responses ... --requests-json translation-requests.json --responses-json translation-responses.json --output-json translated_blocks.json`
 
+Desktop translation batching is prompt-budgeted rather than fixed to a small block count. The preparer packs contiguous blocks up to a character budget, keeps page runs together when a batch is already mostly full, and uses `--batch-size` only as a secondary safety cap.
+
+When `translated_blocks.json` already exists beside `blocks.json`, translation prepare reuses translations for blocks whose extraction fingerprint is unchanged and only emits requests for the remaining blocks.
+
 Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
 1. run `uv run --script scripts/extract_document.py ... --fragment-merge-requests-json fragment-merge-requests.json`
-2. dispatch each fragment-merge prompt to a desktop subagent in the active app
+2. dispatch each fragment-merge prompt batch to a desktop subagent in the active app
 3. collect the JSON-only subagent replies into `fragment-merge-responses.json`
 4. rerun `uv run --script scripts/extract_document.py ... --fragment-merge-responses-json fragment-merge-responses.json`
+
+The extractor batches unresolved fragment pairs document-wide, so one request file may contain a small number of multi-page prompt batches instead of one prompt per page.
+
+Extraction writes `document_hash`, per-page `source_fingerprint`, and per-block fingerprints into `blocks.json` and `run-manifest.json`. On rerun, unchanged pages are reused from the prior extraction output when their cached assets still exist.
 
 Resume expectations:
 
@@ -263,6 +273,8 @@ Current bundled rebuild path:
 - `uv run --script scripts/build_final_pdf.py`
 
 These fields are written into `run-manifest.json` so the current run can be resumed and inspected deterministically.
+
+Final build also records per-page render fingerprints in `run-manifest.json` and caches rendered overlay pages or contiguous rebuild chunks under `.build-cache/`, so unchanged pages can be reused on rerun instead of being rebuilt from scratch.
 
 This now supports:
 

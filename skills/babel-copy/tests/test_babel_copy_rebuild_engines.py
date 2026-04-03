@@ -210,6 +210,45 @@ class StructuredRebuildTests(unittest.TestCase):
 
         self.assertEqual(chunks, [[2, 3], [5]])
 
+    def test_page_render_fingerprint_changes_with_translated_text(self) -> None:
+        page = {
+            "page_number": 1,
+            "page_type": "digital",
+            "region_source": "native",
+            "strategy_hint": "overlay",
+            "source_fingerprint": "src-1",
+            "asset_ids": [],
+            "tables": [],
+        }
+        base_block = {
+            "id": "p1-b1",
+            "role": "paragraph",
+            "align": "left",
+            "bbox": [0, 0, 10, 10],
+            "text": "Bonjour",
+            "translated_text": "Hello",
+            "style": {"font_size_hint": 10.0},
+        }
+        changed_block = dict(base_block)
+        changed_block["translated_text"] = "Greetings"
+
+        left = BUILD_FINAL_PDF.page_render_fingerprint(
+            page,
+            [base_block],
+            {},
+            {"family_class": "serif"},
+            {},
+        )
+        right = BUILD_FINAL_PDF.page_render_fingerprint(
+            page,
+            [changed_block],
+            {},
+            {"family_class": "serif"},
+            {},
+        )
+
+        self.assertNotEqual(left, right)
+
 
 if __name__ == "__main__":
     unittest.main()
