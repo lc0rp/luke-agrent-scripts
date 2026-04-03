@@ -2629,6 +2629,14 @@ def main() -> int:
                         }
                         page_blocks.append(payload)
 
+                if args.write_page_renders:
+                    with profiler.stage(
+                        "write_page_png_artifact",
+                        page_number=page_number,
+                        path=render_path,
+                    ):
+                        render_cache.write_layout_render()
+
                 with profiler.stage("detect_and_fill_tables", page_number=page_number) as table_span:
                     skipped_ruled_table_detection = should_skip_ruled_table_detection(
                         page_blocks, page.rect
@@ -2645,13 +2653,6 @@ def main() -> int:
                             dpi=args.dpi,
                         ):
                             layout_image = render_cache.layout_image()
-                        if args.write_page_renders:
-                            with profiler.stage(
-                                "write_page_png_artifact",
-                                page_number=page_number,
-                                path=render_path,
-                            ):
-                                render_cache.write_layout_render()
                         page_tables = detect_tables(layout_image, page.rect)
                         for table in page_tables:
                             table["id"] = f"p{page_number}-{table['id']}"
@@ -2725,13 +2726,6 @@ def main() -> int:
                             dpi=args.dpi,
                         ):
                             layout_image = render_cache.layout_image()
-                        if args.write_page_renders:
-                            with profiler.stage(
-                                "write_page_png_artifact",
-                                page_number=page_number,
-                                path=render_path,
-                            ):
-                                render_cache.write_layout_render()
                         signature_assets = extract_signature_crops(
                             layout_image,
                             page_number,
