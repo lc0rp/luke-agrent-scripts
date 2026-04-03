@@ -205,9 +205,12 @@ def can_reuse_extracted_page(
     previous_page: dict | None,
     page_fingerprint: str,
     previous_page_assets: list[dict],
+    fragment_merge_review_enabled: bool,
     write_page_renders: bool,
 ) -> bool:
     if not previous_page:
+        return False
+    if fragment_merge_review_enabled:
         return False
     if str(previous_page.get("source_fingerprint", "")) != page_fingerprint:
         return False
@@ -2515,6 +2518,7 @@ def main() -> int:
                     previous_page=previous_page,
                     page_fingerprint=source_fingerprint,
                     previous_page_assets=previous_page_assets,
+                    fragment_merge_review_enabled=fragment_merge_review_enabled,
                     write_page_renders=bool(args.write_page_renders),
                 ):
                     page_blocks = previous_blocks_for_page(previous_payload, page_number)

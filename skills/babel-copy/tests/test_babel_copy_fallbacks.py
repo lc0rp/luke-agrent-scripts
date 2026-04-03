@@ -469,6 +469,7 @@ class ExtractDocumentTests(unittest.TestCase):
                     previous_page=previous_page,
                     page_fingerprint="fp-1",
                     previous_page_assets=[{"path": str(asset_path)}],
+                    fragment_merge_review_enabled=False,
                     write_page_renders=False,
                 )
             )
@@ -477,6 +478,17 @@ class ExtractDocumentTests(unittest.TestCase):
                     previous_page=previous_page,
                     page_fingerprint="fp-2",
                     previous_page_assets=[{"path": str(asset_path)}],
+                    fragment_merge_review_enabled=False,
+                    write_page_renders=False,
+                )
+            )
+
+            self.assertFalse(
+                EXTRACT_DOCUMENT.can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint="fp-1",
+                    previous_page_assets=[{"path": str(asset_path)}],
+                    fragment_merge_review_enabled=True,
                     write_page_renders=False,
                 )
             )
