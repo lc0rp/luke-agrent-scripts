@@ -17,21 +17,42 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import fitz
 
+from batch_payloads import load_json, slice_payload_for_pages, stitch_pdfs, write_json
 from block_overrides import apply_custom_overrides_to_payload
 import core
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build the final babel-copy PDF using the best available page strategy")
-    parser.add_argument("source_pdf")
-    parser.add_argument("translated_blocks_json")
-    parser.add_argument("--output-pdf", required=True)
-    return parser.parse_args()
+    raw_argv = list(sys.argv[1:])
+    commands = {"build", "stitch-batches"}
+    if not raw_argv or raw_argv[0] not in commands:
+        raw_argv = ["build", *raw_argv]
+
+    parser = argparse.ArgumentParser(
+        description="Build batch PDFs and stitched final PDFs for babel-copy"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    build_parser = subparsers.add_parser(
+        "build", help="Build the final babel-copy PDF for a translated payload"
+    )
+    build_parser.add_argument("source_pdf")
+    build_parser.add_argument("translated_blocks_json")
+    build_parser.add_argument("--output-pdf", required=True)
+
+    stitch_parser = subparsers.add_parser(
+        "stitch-batches",
+        help="Stitch batch-local PDFs into one final document PDF from a run manifest or page-batches manifest",
+    )
+    stitch_parser.add_argument("manifest_json")
+    stitch_parser.add_argument("--output-pdf")
+    return parser.parse_args(raw_argv)
 
 
 def resolve_uv_executable() -> str:
@@ -273,47 +294,8 @@ def should_ignore_artifact_obstacle(block: dict) -> bool:
 
 
 def filtered_payload_for_page(payload: dict, page_number: int, assets_by_id: dict[str, dict]) -> dict:
-    page = next(page for page in payload.get("pages", []) if int(page["page_number"]) == page_number)
-    blocks = [block for block in payload.get("blocks", []) if int(block["page_number"]) == page_number]
-    asset_ids = set(page.get("asset_ids", []))
-    for block in blocks:
-        table = block.get("table")
-        if not table:
-            continue
-        cell_id = table.get("cell_id")
-        if not cell_id:
-            continue
-        for table_payload in page.get("tables", []):
-            for cell in table_payload.get("cells", []):
-                if cell.get("id") == cell_id:
-                    asset_ids.update(cell.get("signature_asset_ids", []))
-    assets = [assets_by_id[asset_id] for asset_id in asset_ids if asset_id in assets_by_id]
-    filtered_page = dict(page)
-    filtered_page["page_number"] = 1
-    filtered_page["asset_ids"] = [asset["id"] for asset in assets]
-    filtered_page["tables"] = json.loads(json.dumps(filtered_page.get("tables", [])))
-    for table in filtered_page.get("tables", []):
-        table["page_number"] = 1
-    filtered_blocks = []
-    for block in blocks:
-        copied = json.loads(json.dumps(block))
-        copied["page_number"] = 1
-        filtered_blocks.append(copied)
-    filtered_assets = []
-    for asset in assets:
-        copied = json.loads(json.dumps(asset))
-        copied["page_number"] = 1
-        filtered_assets.append(copied)
-    return {
-        "input_pdf": payload.get("input_pdf"),
-        "page_count": 1,
-        "block_count": len(filtered_blocks),
-        "font_baseline": payload.get("font_baseline"),
-        "pages": [filtered_page],
-        "blocks": filtered_blocks,
-        "assets": filtered_assets,
-        "translation_mode": payload.get("translation_mode"),
-    }
+    del assets_by_id
+    return slice_payload_for_pages(payload, [page_number], renumber_pages=True)
 
 
 def render_overlay_page(
@@ -596,15 +578,69 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path) ->
             temp_path.unlink(missing_ok=True)
 
 
+def stitched_output_pdf_from_manifest(manifest: dict, manifest_json: Path) -> Path:
+    stitched = manifest.get("stitched", {})
+    if isinstance(stitched, dict):
+        raw = str(stitched.get("final_pdf") or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    return manifest_json.parent / "stitched" / "final.pdf"
+
+
+def stitch_batch_pdfs_from_manifest(
+    manifest_json: Path, output_pdf_override: Path | None = None
+) -> Path:
+    manifest = load_json(manifest_json)
+    batch_entries = manifest.get("page_batches", [])
+    if not isinstance(batch_entries, list) or not batch_entries:
+        raise SystemExit(f"No page_batches found in {manifest_json}")
+    pdf_paths = []
+    for entry in batch_entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = str(entry.get("final_pdf") or "").strip()
+        if not raw:
+            raise SystemExit(f"Missing final_pdf for batch entry in {manifest_json}")
+        pdf_paths.append(Path(raw).expanduser().resolve())
+    output_pdf = (
+        output_pdf_override.expanduser().resolve()
+        if output_pdf_override is not None
+        else stitched_output_pdf_from_manifest(manifest, manifest_json)
+    )
+    stitched_pdf = stitch_pdfs(pdf_paths, output_pdf)
+    if str(manifest.get("kind") or "") == "babel_copy_run_manifest":
+        stitched = manifest.setdefault("stitched", {})
+        if isinstance(stitched, dict):
+            stitched["final_pdf"] = str(stitched_pdf)
+        write_json(manifest_json, manifest)
+    return stitched_pdf
+
+
 def main() -> int:
     args = parse_args()
-    source_pdf = Path(args.source_pdf).expanduser().resolve()
-    translated_blocks_json = Path(args.translated_blocks_json).expanduser().resolve()
-    output_pdf = Path(args.output_pdf).expanduser().resolve()
-    payload = apply_custom_overrides_to_payload(json.loads(translated_blocks_json.read_text()))
-    rendered = render_hybrid_document(source_pdf, payload, output_pdf)
-    print(rendered)
-    return 0
+    if args.command == "build":
+        source_pdf = Path(args.source_pdf).expanduser().resolve()
+        translated_blocks_json = Path(args.translated_blocks_json).expanduser().resolve()
+        output_pdf = Path(args.output_pdf).expanduser().resolve()
+        payload = apply_custom_overrides_to_payload(
+            json.loads(translated_blocks_json.read_text())
+        )
+        rendered = render_hybrid_document(source_pdf, payload, output_pdf)
+        print(rendered)
+        return 0
+    if args.command == "stitch-batches":
+        output_pdf = (
+            Path(args.output_pdf).expanduser().resolve()
+            if args.output_pdf
+            else None
+        )
+        stitched_pdf = stitch_batch_pdfs_from_manifest(
+            Path(args.manifest_json).expanduser().resolve(),
+            output_pdf_override=output_pdf,
+        )
+        print(stitched_pdf)
+        return 0
+    raise SystemExit(f"Unsupported command: {args.command}")
 
 
 if __name__ == "__main__":

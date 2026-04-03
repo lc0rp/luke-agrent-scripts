@@ -2,6 +2,14 @@
 
 Use a compact JSON structure. Keep it stable across extraction, translation, and rebuild stages.
 
+Keep three related payload shapes aligned:
+
+- full-document payload: `document/blocks.full.json`
+- page-batch payload: `batches/<batch-id>/blocks.batch.json`
+- stitched translated payload: `document/translated_blocks.full.json` or `stitched/translated_blocks.json`
+
+Page-batch payloads keep the same block IDs and asset IDs as the full document payload. They are filtered subsets, not remapped copies.
+
 ## Payload
 
 ```json
@@ -142,6 +150,51 @@ Use a compact JSON structure. Keep it stable across extraction, translation, and
 - `custom_override.bbox.x` / `y` shift the whole block, while `w` / `h` grow or shrink its width or height.
 - `custom_override.bbox.x0` / `y0` / `x1` / `y1` can override or delta individual edges directly.
 - Overlay pages honor bbox nudges, font-size changes, alignment overrides, color overrides, and text changes. Structured rebuild pages honor text/style/alignment overrides, but not absolute PDF positioning with the same fidelity.
+
+## Page Batch Manifest
+
+`run-manifest.json` and `page-batches.json` should reference page-batch payloads with fields like:
+
+```json
+{
+  "batch_id": "batch-001-p001-010",
+  "page_numbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  "blocks_json": "/abs/path/batches/batch-001-p001-010/blocks.batch.json",
+  "translation_requests_json": "/abs/path/batches/batch-001-p001-010/translation-requests.json",
+  "translation_responses_json": "/abs/path/batches/batch-001-p001-010/translation-responses.json",
+  "translated_blocks_json": "/abs/path/batches/batch-001-p001-010/translated_blocks.batch.json",
+  "final_pdf": "/abs/path/batches/batch-001-p001-010/final.batch.pdf",
+  "compare_report": "/abs/path/batches/batch-001-p001-010/compare/comparison-report.json",
+  "status": {
+    "requests_prepared": true,
+    "responses_applied": true,
+    "rebuilt": false,
+    "pdf_built": false,
+    "compared": false
+  }
+}
+```
+
+## Translation Context
+
+The shared document translation context lives outside the page-batch payloads:
+
+```json
+{
+  "kind": "babel_copy_translation_context",
+  "input_pdf": "/abs/path/source.pdf",
+  "document_title": "source",
+  "source_lang": "French",
+  "target_lang": "English",
+  "protected_terms": ["BCEAO", "AML", "SAMA"],
+  "glossary_hints": [],
+  "style_constraints": [
+    "Preserve numbering.",
+    "Preserve protected entities and identifiers unless they obviously require translation.",
+    "Keep terminology consistent across the document."
+  ]
+}
+```
 
 ## Keep Original
 

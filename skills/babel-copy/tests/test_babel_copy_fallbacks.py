@@ -154,7 +154,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                 output_json=requests_json,
                 source_lang="French",
                 target_lang="English",
-                batch_size=1,
+                block_group_size=1,
                 provider="claude",
                 model="claude-sonnet-4-20250514",
             )
@@ -164,6 +164,9 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(payload["request_count"], 2)
         self.assertEqual(payload["runtime_mode"], "claude")
         self.assertEqual(payload["requests"][0]["block_ids"], ["block-1"])
+        self.assertEqual(payload["requests"][0]["kind"], "translation_block_group")
+        self.assertEqual(payload["requests"][0]["request_id"], "block-group-001")
+        self.assertEqual(payload["block_group_size"], 1)
         self.assertIn("Translate the following document blocks", payload["requests"][0]["prompt"])
 
     def test_apply_response_payload_builds_translated_blocks(self) -> None:
@@ -192,7 +195,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                     {
                         "runtime_mode": "claude",
                         "provider": "claude",
-                        "requests": [{"request_id": "batch-001"}],
+                        "requests": [{"request_id": "block-group-001"}],
                     }
                 )
             )
@@ -201,7 +204,7 @@ class TranslateBlocksCodexTests(unittest.TestCase):
                     {
                         "responses": [
                             {
-                                "request_id": "batch-001",
+                                "request_id": "block-group-001",
                                 "response_text": '{"translations":{"block-1":"Hello"}}',
                             }
                         ]
@@ -220,6 +223,180 @@ class TranslateBlocksCodexTests(unittest.TestCase):
         self.assertEqual(payload["blocks"][0]["translated_text"], "Hello")
         self.assertEqual(payload["translation_mode"], "desktop_subagent")
         self.assertEqual(payload["translation_backend_used"], "claude_desktop_subagent")
+
+    def test_prepare_batches_writes_requests_and_translation_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            document_dir = workspace / "document"
+            batch_dir = workspace / "batches" / "batch-001-p001-001"
+            document_dir.mkdir(parents=True, exist_ok=True)
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            document_blocks = document_dir / "blocks.full.json"
+            batch_blocks = batch_dir / "blocks.batch.json"
+            payload = {
+                "input_pdf": str(workspace / "input.pdf"),
+                "pages": [{"page_number": 1, "asset_ids": [], "tables": []}],
+                "blocks": [
+                    {
+                        "id": "block-1",
+                        "page_number": 1,
+                        "role": "paragraph",
+                        "text": "ACME AML Policy",
+                    }
+                ],
+                "assets": [],
+            }
+            document_blocks.write_text(json.dumps(payload))
+            batch_blocks.write_text(json.dumps(payload))
+            manifest_json = workspace / "run-manifest.json"
+            manifest_json.write_text(
+                json.dumps(
+                    {
+                        "kind": "babel_copy_run_manifest",
+                        "schema_version": "1.0",
+                        "document": {
+                            "blocks_json": str(document_blocks),
+                            "translation_context_json": str(document_dir / "translation-context.json"),
+                        },
+                        "page_batches_json": str(workspace / "page-batches.json"),
+                        "page_batches": [
+                            {
+                                "batch_id": "batch-001-p001-001",
+                                "page_numbers": [1],
+                                "blocks_json": str(batch_blocks),
+                                "translation_requests_json": str(batch_dir / "translation-requests.json"),
+                                "translation_responses_json": str(batch_dir / "translation-responses.json"),
+                                "translated_blocks_json": str(batch_dir / "translated_blocks.batch.json"),
+                                "batch_manifest": str(batch_dir / "batch-manifest.json"),
+                            }
+                        ],
+                    }
+                )
+            )
+            (batch_dir / "batch-manifest.json").write_text(
+                json.dumps({"status": {"requests_prepared": False, "responses_applied": False, "rebuilt": False, "pdf_built": False, "compared": False}})
+            )
+
+            results = TRANSLATE_BLOCKS_DESKTOP.prepare_batches_from_manifest(
+                manifest_json=manifest_json,
+                source_lang="French",
+                target_lang="English",
+                block_group_size=5,
+                provider="claude",
+                model=None,
+            )
+
+            self.assertEqual(len(results), 1)
+            request_payload = json.loads(results[0].read_text())
+            self.assertEqual(request_payload["block_group_size"], 5)
+            translation_context = json.loads(
+                (document_dir / "translation-context.json").read_text()
+            )
+            self.assertEqual(translation_context["target_lang"], "English")
+            self.assertIn("ACME", translation_context["protected_terms"])
+
+    def test_apply_batch_responses_stitches_translated_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            document_dir = workspace / "document"
+            batch1_dir = workspace / "batches" / "batch-001-p001-001"
+            batch2_dir = workspace / "batches" / "batch-002-p002-002"
+            document_dir.mkdir(parents=True, exist_ok=True)
+            batch1_dir.mkdir(parents=True, exist_ok=True)
+            batch2_dir.mkdir(parents=True, exist_ok=True)
+            document_blocks = document_dir / "blocks.full.json"
+            full_payload = {
+                "pages": [
+                    {"page_number": 1, "asset_ids": [], "tables": []},
+                    {"page_number": 2, "asset_ids": [], "tables": []},
+                ],
+                "blocks": [
+                    {"id": "block-1", "page_number": 1, "role": "paragraph", "bbox": [0, 0, 1, 1], "text": "Bonjour"},
+                    {"id": "block-2", "page_number": 2, "role": "paragraph", "bbox": [0, 0, 1, 1], "text": "Merci"},
+                ],
+                "assets": [],
+            }
+            document_blocks.write_text(json.dumps(full_payload))
+            (batch1_dir / "blocks.batch.json").write_text(
+                json.dumps(
+                    {
+                        "pages": [{"page_number": 1, "asset_ids": [], "tables": []}],
+                        "blocks": [{"id": "block-1", "page_number": 1, "role": "paragraph", "bbox": [0, 0, 1, 1], "text": "Bonjour"}],
+                        "assets": [],
+                    }
+                )
+            )
+            (batch2_dir / "blocks.batch.json").write_text(
+                json.dumps(
+                    {
+                        "pages": [{"page_number": 2, "asset_ids": [], "tables": []}],
+                        "blocks": [{"id": "block-2", "page_number": 2, "role": "paragraph", "bbox": [0, 0, 1, 1], "text": "Merci"}],
+                        "assets": [],
+                    }
+                )
+            )
+            for index, batch_dir in enumerate((batch1_dir, batch2_dir), start=1):
+                request_id = f"block-group-00{index}"
+                (batch_dir / "translation-requests.json").write_text(
+                    json.dumps({"runtime_mode": "claude", "provider": "claude", "requests": [{"request_id": request_id}]})
+                )
+                translated_text = "Hello" if index == 1 else "Thanks"
+                block_id = f"block-{index}"
+                (batch_dir / "translation-responses.json").write_text(
+                    json.dumps({"responses": [{"request_id": request_id, "response_text": json.dumps({"translations": {block_id: translated_text}})}]})
+                )
+                (batch_dir / "batch-manifest.json").write_text(
+                    json.dumps({"status": {"requests_prepared": True, "responses_applied": False, "rebuilt": False, "pdf_built": False, "compared": False}})
+                )
+            manifest_json = workspace / "run-manifest.json"
+            manifest_json.write_text(
+                json.dumps(
+                    {
+                        "kind": "babel_copy_run_manifest",
+                        "schema_version": "1.0",
+                        "document": {
+                            "blocks_json": str(document_blocks),
+                            "translated_blocks_json": str(document_dir / "translated_blocks.full.json"),
+                        },
+                        "stitched": {
+                            "translated_blocks_json": str(workspace / "stitched" / "translated_blocks.json")
+                        },
+                        "page_batches_json": str(workspace / "page-batches.json"),
+                        "page_batches": [
+                            {
+                                "batch_id": "batch-001-p001-001",
+                                "page_numbers": [1],
+                                "blocks_json": str(batch1_dir / "blocks.batch.json"),
+                                "translation_requests_json": str(batch1_dir / "translation-requests.json"),
+                                "translation_responses_json": str(batch1_dir / "translation-responses.json"),
+                                "translated_blocks_json": str(batch1_dir / "translated_blocks.batch.json"),
+                                "batch_manifest": str(batch1_dir / "batch-manifest.json"),
+                            },
+                            {
+                                "batch_id": "batch-002-p002-002",
+                                "page_numbers": [2],
+                                "blocks_json": str(batch2_dir / "blocks.batch.json"),
+                                "translation_requests_json": str(batch2_dir / "translation-requests.json"),
+                                "translation_responses_json": str(batch2_dir / "translation-responses.json"),
+                                "translated_blocks_json": str(batch2_dir / "translated_blocks.batch.json"),
+                                "batch_manifest": str(batch2_dir / "batch-manifest.json"),
+                            },
+                        ],
+                    }
+                )
+            )
+
+            translated_paths, stitched_path = TRANSLATE_BLOCKS_DESKTOP.apply_batch_responses_from_manifest(
+                manifest_json=manifest_json,
+                provider_override=None,
+            )
+
+            self.assertEqual(len(translated_paths), 2)
+            stitched_payload = json.loads(stitched_path.read_text())
+            self.assertEqual(
+                [block["translated_text"] for block in stitched_payload["blocks"]],
+                ["Hello", "Thanks"],
+            )
 
 
 class ExtractDocumentTests(unittest.TestCase):

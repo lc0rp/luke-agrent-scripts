@@ -24,6 +24,14 @@ from statistics import median
 import fitz
 import numpy as np
 from PIL import Image
+from batch_payloads import (
+    DEFAULT_PAGE_BATCH_SIZE,
+    DEFAULT_PAGE_BATCH_THRESHOLD_BYTES,
+    DEFAULT_PAGE_BATCH_THRESHOLD_PAGES,
+    build_page_batch_specs,
+    slice_payload_for_pages,
+    write_json,
+)
 from translation_runtime import (
     TRANSLATION_PROVIDER_CHOICES,
     detect_runtime_mode,
@@ -82,6 +90,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fragment-merge-responses-json",
         help="Optional path to read desktop-subagent fragment merge responses.",
+    )
+    parser.add_argument(
+        "--page-batch-size",
+        type=int,
+        default=DEFAULT_PAGE_BATCH_SIZE,
+        help="Pages per page batch when page batching is enabled.",
+    )
+    parser.add_argument(
+        "--page-batch-threshold-pages",
+        type=int,
+        default=DEFAULT_PAGE_BATCH_THRESHOLD_PAGES,
+        help="Enable multi-page batching when the document exceeds this many pages.",
+    )
+    parser.add_argument(
+        "--page-batch-threshold-bytes",
+        type=int,
+        default=DEFAULT_PAGE_BATCH_THRESHOLD_BYTES,
+        help="Enable multi-page batching when blocks.full.json would exceed this many bytes.",
     )
     return parser.parse_args()
 
@@ -2324,12 +2350,123 @@ def main() -> int:
     if fragment_merge_responses_path is not None:
         payload["fragment_merge_responses_json"] = str(fragment_merge_responses_path)
         payload["fragment_merge_decision_count"] = len(provided_fragment_merge_decisions)
-    (output_dir / "source.md").write_text("\n".join(markdown_lines))
-    (output_dir / "blocks.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False)
+    source_md_path = output_dir / "source.md"
+    blocks_json_path = output_dir / "blocks.json"
+    source_md_path.write_text("\n".join(markdown_lines))
+    blocks_json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    document_dir = output_dir / "document"
+    batches_dir = output_dir / "batches"
+    stitched_dir = output_dir / "stitched"
+    document_dir.mkdir(parents=True, exist_ok=True)
+    batches_dir.mkdir(parents=True, exist_ok=True)
+    stitched_dir.mkdir(parents=True, exist_ok=True)
+
+    document_source_md = document_dir / "source.md"
+    document_blocks_json = document_dir / "blocks.full.json"
+    document_source_md.write_text("\n".join(markdown_lines))
+    document_blocks_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    page_batch_specs = build_page_batch_specs(
+        payload,
+        page_batch_size=args.page_batch_size,
+        threshold_pages=args.page_batch_threshold_pages,
+        threshold_bytes=args.page_batch_threshold_bytes,
     )
-    print(output_dir / "source.md")
-    print(output_dir / "blocks.json")
+    batch_entries = []
+    for spec in page_batch_specs:
+        batch_dir = batches_dir / spec["batch_id"]
+        blocks_batch_json = batch_dir / "blocks.batch.json"
+        batch_manifest_path = batch_dir / "batch-manifest.json"
+        batch_payload = slice_payload_for_pages(payload, spec["page_numbers"])
+        write_json(blocks_batch_json, batch_payload)
+        batch_manifest = {
+            "schema_version": "1.0",
+            "kind": "babel_copy_page_batch",
+            "batch_id": spec["batch_id"],
+            "batch_index": spec["batch_index"],
+            "total_batches": spec["total_batches"],
+            "page_numbers": spec["page_numbers"],
+            "start_page": spec["start_page"],
+            "end_page": spec["end_page"],
+            "page_count": spec["page_count"],
+            "blocks_json": str(blocks_batch_json),
+            "translation_requests_json": str(batch_dir / "translation-requests.json"),
+            "translation_responses_json": str(batch_dir / "translation-responses.json"),
+            "translated_blocks_json": str(batch_dir / "translated_blocks.batch.json"),
+            "rebuilt_typ_path": str(batch_dir / "rebuild.typ"),
+            "final_pdf": str(batch_dir / "final.batch.pdf"),
+            "compare_dir": str(batch_dir / "compare"),
+            "compare_report": str(batch_dir / "compare" / "comparison-report.json"),
+            "status": {
+                "requests_prepared": False,
+                "responses_applied": False,
+                "rebuilt": False,
+                "pdf_built": False,
+                "compared": False,
+            },
+        }
+        write_json(batch_manifest_path, batch_manifest)
+        batch_entry = {
+            **spec,
+            "batch_manifest": str(batch_manifest_path),
+            "blocks_json": str(blocks_batch_json),
+            "translation_requests_json": batch_manifest["translation_requests_json"],
+            "translation_responses_json": batch_manifest["translation_responses_json"],
+            "translated_blocks_json": batch_manifest["translated_blocks_json"],
+            "final_pdf": batch_manifest["final_pdf"],
+            "compare_dir": batch_manifest["compare_dir"],
+            "compare_report": batch_manifest["compare_report"],
+            "status": dict(batch_manifest["status"]),
+        }
+        batch_entries.append(batch_entry)
+
+    page_batches_payload = {
+        "schema_version": "1.0",
+        "kind": "babel_copy_page_batches",
+        "output_dir": str(output_dir),
+        "document_blocks_json": str(document_blocks_json),
+        "page_batch_size": args.page_batch_size,
+        "page_batch_threshold_pages": args.page_batch_threshold_pages,
+        "page_batch_threshold_bytes": args.page_batch_threshold_bytes,
+        "page_batching_enabled": len(page_batch_specs) > 1,
+        "page_batch_count": len(page_batch_specs),
+        "page_batches": batch_entries,
+    }
+    page_batches_json = write_json(output_dir / "page-batches.json", page_batches_payload)
+
+    run_manifest = {
+        "schema_version": "1.0",
+        "kind": "babel_copy_run_manifest",
+        "input_pdf": str(input_pdf),
+        "output_dir": str(output_dir),
+        "document": {
+            "source_md": str(document_source_md),
+            "blocks_json": str(document_blocks_json),
+            "translation_context_json": str(document_dir / "translation-context.json"),
+            "translated_blocks_json": str(document_dir / "translated_blocks.full.json"),
+        },
+        "page_batch_size": args.page_batch_size,
+        "page_batch_threshold_pages": args.page_batch_threshold_pages,
+        "page_batch_threshold_bytes": args.page_batch_threshold_bytes,
+        "page_batching_enabled": len(page_batch_specs) > 1,
+        "page_batch_count": len(page_batch_specs),
+        "page_batches_json": str(page_batches_json),
+        "page_batches": batch_entries,
+        "stitched": {
+            "translated_blocks_json": str(stitched_dir / "translated_blocks.json"),
+            "final_pdf": str(stitched_dir / "final.pdf"),
+            "compare_dir": str(stitched_dir / "compare"),
+            "compare_report": str(stitched_dir / "compare" / "comparison-report.json"),
+        },
+    }
+    run_manifest_path = write_json(output_dir / "run-manifest.json", run_manifest)
+
+    print(source_md_path)
+    print(blocks_json_path)
+    print(document_blocks_json)
+    print(page_batches_json)
+    print(run_manifest_path)
     if fragment_merge_requests_path is not None:
         print(fragment_merge_requests_path)
     print(assets_dir)

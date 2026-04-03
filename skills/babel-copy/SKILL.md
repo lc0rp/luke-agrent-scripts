@@ -20,9 +20,12 @@ Use this skill when the translated document should read like a proper target-lan
 - Final translated PDF names should be intuitive. Derive them from the original filename plus the target language short form, with an optional timestamp or counter only when needed to distinguish multiple runs of the same file. Avoid generic names such as `translated.pdf`.
 - Working artifacts:
   - source text in Markdown
-  - structured block manifest
+  - full-document structured block manifest
+  - page-batch block manifests
+  - document-level translation context
   - document-level `font_baseline` captured in the manifest
-  - translated text in Markdown or JSON blocks
+  - translated full-document JSON blocks
+  - translated page-batch JSON blocks
   - rebuilt rich-layout source, preferably `.typ`
   - QA renders and notes
   - `run-manifest.json` with canonical artifact paths for the current translation run
@@ -49,6 +52,13 @@ The pipeline is:
 3. rebuild layout in an editable format
 4. place preserved non-text assets
 5. export PDF and run visual QA
+
+Two orchestration layers are now explicit:
+
+- `page batch`: a contiguous page-range work unit with its own payload, transient files, translated payload, rebuilt output, batch PDF, and batch compare report
+- `block group`: a prompt-sized group of translatable blocks inside one page batch
+
+Use `page batch` for resume granularity and subagent parallelism. Use `block group` for token control.
 
 ## Dependency Bootstrap
 
@@ -85,7 +95,11 @@ Current babel-copy scripts already ship inline uv metadata and adjacent lockfile
 Produce:
 
 - `source.md`: clean reading-order text in the source language
-- `blocks.json`: page-level structured content with bbox, role, alignment, list/table metadata, and inferred style
+- `blocks.json`: compatibility copy of the full-document structured content
+- `document/blocks.full.json`: canonical full-document structured content
+- `batches/<batch-id>/blocks.batch.json`: page-batch structured content
+- `page-batches.json`: page-batch routing manifest
+- `run-manifest.json`: canonical run routing manifest
 - `assets/`: extracted logos, signatures, stamps, lines, boxes, and reusable images
 
 Extract semantic blocks, not OCR lines. Merge wrapped lines into paragraphs before translation.
@@ -136,9 +150,21 @@ Run it to create:
 
 - `source.md`
 - `blocks.json`
+- `document/source.md`
+- `document/blocks.full.json`
+- `batches/<batch-id>/blocks.batch.json`
+- `page-batches.json`
+- `run-manifest.json`
 - `assets/`
 - page renders for QA and fallback composition
 - `font_baseline` metadata for later fallback-font decisions
+
+Page batching defaults:
+
+- `--page-batch-size 10`
+- `--page-batch-threshold-pages 20`
+- `--page-batch-threshold-bytes 8388608`
+- if the document does not cross either threshold, extraction still emits one page batch covering the whole document
 
 OCR backend options:
 
@@ -158,6 +184,12 @@ Produce:
 - `translated.md`
 - `translated_blocks.json`
 
+Operator-facing translation terms:
+
+- use `--block-group-size` for prompt-sized block grouping
+- `--batch-size` still works as a compatibility alias for one transition period
+- do not describe prompt-sized grouping as page batching
+
 Translate with context:
 
 - preserve names, identifiers, account numbers, and product names unless the user asks otherwise
@@ -169,10 +201,21 @@ Translate with context:
 
 Desktop translation flow for Codex Desktop or Claude Desktop:
 
-1. run `uv run --script scripts/translate_blocks_desktop.py prepare ... --output-json translation-requests.json`
+Small or one-batch documents:
+
+1. run `uv run --script scripts/translate_blocks_desktop.py prepare ... --output-json translation-requests.json --block-group-size 18`
 2. dispatch each request prompt to a desktop subagent in the active app
 3. collect the JSON-only subagent replies into `translation-responses.json`
 4. run `uv run --script scripts/translate_blocks_desktop.py apply-responses ... --requests-json translation-requests.json --responses-json translation-responses.json --output-json translated_blocks.json`
+
+Large or auto-batched documents:
+
+1. run extraction first so `run-manifest.json` and `page-batches.json` exist
+2. run `uv run --script scripts/translate_blocks_desktop.py prepare-batches run-manifest.json --block-group-size 18`
+3. dispatch each page batch's block-group prompts to desktop subagents
+4. collect JSON-only replies into each batch's `translation-responses.json`
+5. run `uv run --script scripts/translate_blocks_desktop.py apply-batch-responses run-manifest.json`
+6. use `document/translated_blocks.full.json` or `stitched/translated_blocks.json` as the canonical stitched output
 
 Desktop fragment-merge flow for Codex Desktop or Claude Desktop:
 
@@ -187,6 +230,8 @@ Resume expectations:
 - when resuming, confirm the artifacts belong to the same source file; outputs from separate file translations do not count as resume state for the current file
 
 When the document is complex, it is acceptable to delegate specific components or blocks to desktop subagents for focused translation or inspection. Use this to speed up work, not to fragment terminology. Keep one shared glossary/context for the full document.
+
+`prepare-batches` writes `document/translation-context.json` once per run. Reuse that shared context across all page batches so terminology stays stable.
 
 If no API or local MT backend is available or desired, use a manual phrase-map flow:
 
@@ -224,6 +269,8 @@ Current bundled rebuild path:
 - `uv run --script scripts/rebuild_typst.py`
 - `uv run --script scripts/export_typst_pdf.py`
 - `uv run --script scripts/build_final_pdf.py`
+
+The rebuild path now accepts full-document payloads and page-batch payloads. Multi-page page batches are valid inputs to `rebuild_typst.py`.
 
 These fields are written into `run-manifest.json` so the current run can be resumed and inspected deterministically.
 
@@ -277,6 +324,16 @@ Run a check step before declaring success:
 - compare source vs translated renders side by side with `uv run --script scripts/compare_rendered_pages.py`
 - use judgment on the rendered images; do not trust the pipeline just because it completed
 
+Tiered stitched QA is the default policy:
+
+- always run per-batch compares
+- always run stitched-document structural verification after stitching
+- for stitched compare renders:
+  - if the document has 20 pages or fewer, render every page
+  - if the document is longer than 20 pages, use tiered sampled rendering by default
+  - tiered stitched sampling should include the first page, the last page, the first and last page of every page batch, pages with tables or signatures, and pages with `custom_override`
+- force exhaustive stitched rendering when page count mismatches, stitched coverage is incomplete, a batch compare already looks suspicious, or sampled stitched renders reveal issues
+
 If visual QA reveals overlapping text or any other local layout problem that does not justify changing extraction or renderer logic, use a targeted post-process override pass:
 
 - edit `translated_blocks.json`, not `blocks.json`
@@ -316,14 +373,15 @@ Final notes must state:
 
 This skill now ships its own bundled scripts:
 
+- `scripts/batch_payloads.py`: shared page-batch slicing, stitching, PDF stitching, and translation-context helpers
 - `scripts/core.py`: local extraction and composition primitives
 - `scripts/extract_document.py`: source text, block manifest, and asset extraction
 - `scripts/babel_copy_manual.py`: manual extract/apply bootstrap flow
 - `scripts/rebuild_typst.py`: minimal `.typ` rebuild from translated blocks
 - `scripts/export_typst_pdf.py`: Typst CLI PDF export
-- `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page
-- `scripts/compare_rendered_pages.py`: side-by-side visual QA helper for review
-- `scripts/translate_blocks_desktop.py`: block translation request prep/apply for desktop subagents
+- `scripts/build_final_pdf.py`: chooses overlay-vs-rebuild final PDF rendering per page and stitches batch PDFs
+- `scripts/compare_rendered_pages.py`: side-by-side visual QA helper with exhaustive or tiered sampled stitched review
+- `scripts/translate_blocks_desktop.py`: block-group translation request prep/apply for desktop subagents and page-batch prepare/apply orchestration
 - each Python script includes inline uv metadata and should be invoked with `uv run --script`
 - each Python script is expected to ship with an adjacent `.lock` file
 

@@ -6,6 +6,13 @@ Generate a translated PDF that approximates a professionally rebuilt target-lang
 
 Treat translation quality and visual fidelity as co-equal goals.
 
+Two orchestration layers are explicit:
+
+- `page batch`: contiguous page-range work units with their own payloads and transient outputs
+- `block group`: prompt-sized groups of translatable blocks inside one page batch
+
+Use page batches for large-document fan-out and resume. Use block groups for prompt sizing.
+
 ## Preferred Stages
 
 ### Stage 1: Extraction
@@ -14,6 +21,10 @@ Outputs:
 
 - `source.md`
 - `blocks.json`
+- `document/blocks.full.json`
+- `batches/<batch-id>/blocks.batch.json`
+- `page-batches.json`
+- `run-manifest.json`
 - `assets/`
 
 Do not skip preview renders. Render representative pages early and choose handling strategy from what you see, not from file type alone.
@@ -56,6 +67,10 @@ Outputs:
 
 - `translated.md`
 - `translated_blocks.json`
+- `document/translation-context.json`
+- `document/translated_blocks.full.json`
+- `batches/<batch-id>/translation-requests.json`
+- `batches/<batch-id>/translated_blocks.batch.json`
 
 Translation should operate on semantic blocks:
 
@@ -73,6 +88,12 @@ Not on:
 - raw OCR lines
 - signature scribbles
 - stray footer artifacts
+
+Operator-facing flags:
+
+- `--block-group-size` controls prompt-sized block grouping
+- `--batch-size` remains a compatibility alias for `--block-group-size`
+- `--page-batch-size` controls contiguous page-range splitting
 
 ### Stage 3: Editable Rebuild
 
@@ -131,12 +152,14 @@ Use the comparison step to generate side-by-side page renders for human review.
 Automation-oriented runs should also emit a `run-manifest.json` with enough metadata for later stages to find the exact source run. At minimum include:
 
 - `output_dir`
-- `compare_dir`
-- `compare_report`
-- `expected_qa_report`
-- `document_id` when supplied
-- `cycle_id` when supplied
-- `run_label` when supplied
+- `document.blocks_json`
+- `document.translation_context_json`
+- `document.translated_blocks_json`
+- `page_batches_json`
+- `page_batches[]`
+- `stitched.final_pdf`
+- `stitched.compare_dir`
+- `stitched.compare_report`
 
 If the source is a branded native-text PDF with stable artwork and no form/table reconstruction needs, do not force it through structured rebuild first. Use the original source page as the template, whiten translated text regions, and draw translated semantic blocks back onto that page.
 
@@ -158,7 +181,11 @@ When visual QA reveals overlapping text or any other layout defect, treat that a
 Visual inspection scope:
 
 - if the document is 20 pages or fewer, inspect every page
-- if the document is longer than 20 pages, inspect the first page, the last page, and every page with signatures, tables, forms, or diagrams
+- if the document is longer than 20 pages, use stitched tiered sampling by default:
+  - inspect the first page and the last page
+  - inspect the first and last page of every page batch
+  - inspect every page with signatures, tables, forms, or diagrams
+  - inspect every page with `custom_override`
 - on each reviewed page, explicitly check for overlapping text, duplicate text draws, collisions between nearby translated blocks, and text crossing table, form, or signature boundaries
 
 ## Near-Term Implementation Order
@@ -176,10 +203,10 @@ It means the final PDF should come from an editable intermediate rebuilt from ex
 
 Concretely:
 
-- source PDF -> `source.md` + `blocks.json` + `assets/`
-- translation step -> `translated_blocks.json`
-- rebuild step -> `.typ` with page breaks, headings, paragraphs, tables, form labels, and preserved signature boxes
-- export step -> PDF
+- source PDF -> `source.md` + `document/blocks.full.json` + `batches/<batch-id>/blocks.batch.json` + `assets/`
+- translation step -> `document/translation-context.json` + per-batch request/response files + stitched `document/translated_blocks.full.json`
+- rebuild step -> batch-local `.typ` files with page breaks, headings, paragraphs, tables, form labels, and preserved signature boxes
+- export step -> batch PDFs + stitched final PDF
 
 The goal is:
 

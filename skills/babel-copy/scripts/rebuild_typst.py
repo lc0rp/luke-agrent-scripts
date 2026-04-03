@@ -147,14 +147,41 @@ def render_table(page: dict, table: dict, blocks_by_id: dict[str, dict], assets_
     for row_index in range(len(rows) - 1):
         for col_index in range(len(columns) - 1):
             cell_fragments.append(render_cell(cells_by_position[(row_index, col_index)], blocks_by_id, assets_by_id, assets_dir))
+    joined_cells = ",\n  ".join(cell_fragments)
     return (
         "#table(\n"
         f"  columns: {column_spec},\n"
         "  inset: 6pt,\n"
         "  stroke: 0.5pt,\n"
-        f"  {',\n  '.join(cell_fragments)},\n"
+        f"  {joined_cells},\n"
         ")"
     )
+
+
+def render_page_content(
+    page: dict,
+    page_blocks: list[dict],
+    blocks_by_id: dict[str, dict],
+    assets_by_id: dict[str, dict],
+    assets_dir: Path,
+) -> list[str]:
+    lines = [
+        f"#set page(width: {typst_length(page['width'])}, height: {typst_length(page['height'])}, margin: (left: 36pt, right: 36pt, top: 32pt, bottom: 32pt))",
+    ]
+    for block in page_blocks:
+        if block.get("keep_original"):
+            continue
+        if block.get("table"):
+            continue
+        if block.get("role") == "artifact":
+            continue
+        lines.append(render_block(block))
+        lines.append("")
+
+    for table in sorted(page.get("tables", []), key=lambda item: item["bbox"][1]):
+        lines.append(render_table(page, table, blocks_by_id, assets_by_id, assets_dir))
+        lines.append("")
+    return lines
 
 
 def main() -> int:
@@ -180,30 +207,27 @@ def main() -> int:
     for page_blocks in blocks_by_page.values():
         page_blocks.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
 
-    first_page = pages[0]
     lines = [
-        f"#set page(width: {typst_length(first_page['width'])}, height: {typst_length(first_page['height'])}, margin: (left: 36pt, right: 36pt, top: 32pt, bottom: 32pt))",
         "#set par(justify: false)",
         f"#set text(font: {typst_font_stack(font_baseline)}, size: 10.5pt)",
         "",
     ]
 
-    page = first_page
-    page_number = int(page["page_number"])
-    page_blocks = blocks_by_page.get(page_number, [])
-    for block in page_blocks:
-        if block.get("keep_original"):
-            continue
-        if block.get("table"):
-            continue
-        if block.get("role") == "artifact":
-            continue
-        lines.append(render_block(block))
-        lines.append("")
-
-    for table in sorted(page.get("tables", []), key=lambda item: item["bbox"][1]):
-        lines.append(render_table(page, table, blocks_by_id, assets_by_id, assets_dir))
-        lines.append("")
+    for page_index, page in enumerate(pages):
+        if page_index:
+            lines.append("#pagebreak()")
+            lines.append("")
+        page_number = int(page["page_number"])
+        page_blocks = blocks_by_page.get(page_number, [])
+        lines.extend(
+            render_page_content(
+                page,
+                page_blocks,
+                blocks_by_id,
+                assets_by_id,
+                assets_dir,
+            )
+        )
 
     output_path.write_text("\n".join(lines).rstrip() + "\n")
     print(output_path)

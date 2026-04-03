@@ -74,6 +74,40 @@ class StructuredRebuildTests(unittest.TestCase):
         self.assertEqual(render_hybrid_document.call_args.args, (source_pdf.resolve(), {"pages": [], "blocks": []}, output_pdf.resolve()))
         self.assertEqual(render_hybrid_document.call_args.kwargs, {})
 
+    def test_stitch_batch_pdfs_from_manifest_uses_manifest_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_raw:
+            workspace = Path(tmp_raw)
+            manifest_json = workspace / "run-manifest.json"
+            batch1_pdf = workspace / "batches" / "batch-001" / "final.batch.pdf"
+            batch2_pdf = workspace / "batches" / "batch-002" / "final.batch.pdf"
+            batch1_pdf.parent.mkdir(parents=True, exist_ok=True)
+            batch2_pdf.parent.mkdir(parents=True, exist_ok=True)
+            batch1_pdf.write_bytes(b"%PDF-1.4\n")
+            batch2_pdf.write_bytes(b"%PDF-1.4\n")
+            manifest_json.write_text(
+                json.dumps(
+                    {
+                        "kind": "babel_copy_run_manifest",
+                        "page_batches": [
+                            {"final_pdf": str(batch1_pdf)},
+                            {"final_pdf": str(batch2_pdf)},
+                        ],
+                        "stitched": {"final_pdf": str(workspace / "stitched" / "final.pdf")},
+                    }
+                )
+            )
+
+            with mock.patch.object(
+                BUILD_FINAL_PDF, "stitch_pdfs", return_value=(workspace / "stitched" / "final.pdf")
+            ) as stitch_pdfs:
+                result = BUILD_FINAL_PDF.stitch_batch_pdfs_from_manifest(manifest_json)
+
+        self.assertEqual(result, workspace / "stitched" / "final.pdf")
+        self.assertEqual(
+            stitch_pdfs.call_args.args,
+            ([batch1_pdf.resolve(), batch2_pdf.resolve()], (workspace / "stitched" / "final.pdf").resolve()),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
