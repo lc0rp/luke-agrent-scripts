@@ -241,6 +241,57 @@ class TranslateBlocksCodexTests(unittest.TestCase):
             ["block-2"],
         ])
 
+    def test_incremental_prompt_char_accounting_matches_full_prompt_length(self) -> None:
+        payloads = [
+            TRANSLATE_BLOCKS_DESKTOP.translation_block_prompt_payload(
+                {
+                    "id": "block-1",
+                    "page_number": 1,
+                    "role": "paragraph",
+                    "text": "Bonjour",
+                }
+            ),
+            TRANSLATE_BLOCKS_DESKTOP.translation_block_prompt_payload(
+                {
+                    "id": "block-2",
+                    "page_number": 1,
+                    "role": "table_cell",
+                    "text": "Adresse de l'entreprise",
+                }
+            ),
+            TRANSLATE_BLOCKS_DESKTOP.translation_block_prompt_payload(
+                {
+                    "id": "block-3",
+                    "page_number": 2,
+                    "role": "footer",
+                    "text": "Confidentiel",
+                }
+            ),
+        ]
+
+        accumulated_payloads = []
+        payload_chars = 0
+        for payload in payloads:
+            accumulated_payloads.append(payload)
+            payload_chars = TRANSLATE_BLOCKS_DESKTOP.appended_payload_chars(
+                payload_chars,
+                payload,
+            )
+            self.assertEqual(
+                TRANSLATE_BLOCKS_DESKTOP.prompt_chars_for_payload_chars(
+                    payload_chars,
+                    "French",
+                    "English",
+                ),
+                len(
+                    TRANSLATE_BLOCKS_DESKTOP.build_prompt_from_payloads(
+                        accumulated_payloads,
+                        "French",
+                        "English",
+                    )
+                ),
+            )
+
     def test_prepare_request_payload_reuses_cached_translations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_raw:
             workspace = Path(tmp_raw)

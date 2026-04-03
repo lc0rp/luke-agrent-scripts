@@ -189,31 +189,58 @@ def translation_block_prompt_payload(block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def prompt_prefix(source_lang: str, target_lang: str) -> str:
+    return (
+        f"Translate the following document blocks from {source_lang} to {target_lang}.\n\n"
+        "Requirements:\n"
+        "- Return JSON only.\n"
+        "- Preserve legal/compliance meaning accurately.\n"
+        "- Keep numbering stable.\n"
+        "- Preserve entity names, emails, addresses, phone numbers, regulator acronyms, product names, and software/vendor names unless they obviously need translation.\n"
+        "- Preserve all-caps organization names and signature-block party names verbatim unless the source text explicitly translates them.\n"
+        "- Translate headers, footers, table headers, labels, captions, and body text.\n"
+        "- Keep terminology consistent across the batch.\n"
+        "- Do not explain your work.\n\n"
+        "Return exactly this shape:\n"
+        "{\n"
+        '  "translations": {\n'
+        '    "block_id": "translated text"\n'
+        "  }\n"
+        "}\n\n"
+        "Blocks:\n"
+    )
+
+
+def serialize_prompt_payloads(blocks_payload: list[dict[str, Any]]) -> str:
+    return json.dumps(blocks_payload, ensure_ascii=False, indent=2)
+
+
+def indented_payload_json(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    return "\n".join(f"  {line}" for line in serialized.splitlines())
+
+
+def appended_payload_chars(current_payload_chars: int, payload: dict[str, Any]) -> int:
+    payload_chars = len(indented_payload_json(payload))
+    if current_payload_chars == 0:
+        return len("[\n") + payload_chars + len("\n]")
+    return current_payload_chars + len(",\n") + payload_chars
+
+
+def prompt_chars_for_payload_chars(
+    payload_chars: int, source_lang: str, target_lang: str
+) -> int:
+    return len(prompt_prefix(source_lang, target_lang)) + payload_chars + len("\n")
+
+
 def build_prompt_from_payloads(
     blocks_payload: list[dict[str, Any]], source_lang: str, target_lang: str
 ) -> str:
-    return f"""Translate the following document blocks from {source_lang} to {target_lang}.
-
-Requirements:
-- Return JSON only.
-- Preserve legal/compliance meaning accurately.
-- Keep numbering stable.
-- Preserve entity names, emails, addresses, phone numbers, regulator acronyms, product names, and software/vendor names unless they obviously need translation.
-- Preserve all-caps organization names and signature-block party names verbatim unless the source text explicitly translates them.
-- Translate headers, footers, table headers, labels, captions, and body text.
-- Keep terminology consistent across the batch.
-- Do not explain your work.
-
-Return exactly this shape:
-{{
-  "translations": {{
-    "block_id": "translated text"
-  }}
-}}
-
-Blocks:
-{json.dumps(blocks_payload, ensure_ascii=False, indent=2)}
-"""
+    return (
+        prompt_prefix(source_lang, target_lang)
+        + serialize_prompt_payloads(blocks_payload)
+        + "\n"
+    )
 
 
 def build_prompt(
@@ -238,16 +265,16 @@ def chunk_translation_batches(
     max_prompt_chars = max(1, max_prompt_chars)
     batches: list[list[dict[str, Any]]] = []
     current_blocks: list[dict[str, Any]] = []
-    current_payloads: list[dict[str, Any]] = []
+    current_payload_chars = 0
     current_prompt_chars = 0
 
     def flush_current() -> None:
-        nonlocal current_blocks, current_payloads, current_prompt_chars
+        nonlocal current_blocks, current_payload_chars, current_prompt_chars
         if not current_blocks:
             return
         batches.append(current_blocks)
         current_blocks = []
-        current_payloads = []
+        current_payload_chars = 0
         current_prompt_chars = 0
 
     for block in items:
@@ -265,26 +292,26 @@ def chunk_translation_batches(
         ):
             flush_current()
 
-        candidate_payloads = [*current_payloads, payload]
-        candidate_prompt_chars = len(
-            build_prompt_from_payloads(candidate_payloads, source_lang, target_lang)
+        candidate_payload_chars = appended_payload_chars(current_payload_chars, payload)
+        candidate_prompt_chars = prompt_chars_for_payload_chars(
+            candidate_payload_chars,
+            source_lang,
+            target_lang,
         )
         if current_blocks and (
             len(current_blocks) >= max_blocks
             or candidate_prompt_chars > max_prompt_chars
         ):
             flush_current()
-            candidate_payloads = [payload]
-            candidate_prompt_chars = len(
-                build_prompt_from_payloads(
-                    candidate_payloads,
-                    source_lang,
-                    target_lang,
-                )
+            candidate_payload_chars = appended_payload_chars(0, payload)
+            candidate_prompt_chars = prompt_chars_for_payload_chars(
+                candidate_payload_chars,
+                source_lang,
+                target_lang,
             )
 
         current_blocks.append(block)
-        current_payloads = candidate_payloads
+        current_payload_chars = candidate_payload_chars
         current_prompt_chars = candidate_prompt_chars
 
     flush_current()
