@@ -176,6 +176,7 @@ class StructuredRebuildTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(render_hybrid_document.call_args.args, (source_pdf.resolve(), {"pages": [], "blocks": []}, output_pdf.resolve()))
         self.assertIn("profiler", render_hybrid_document.call_args.kwargs)
+        self.assertIn("source_document_hash", render_hybrid_document.call_args.kwargs)
 
     def test_filtered_payload_for_pages_renumbers_multi_page_chunk(self) -> None:
         payload = {
@@ -289,6 +290,7 @@ class StructuredRebuildTests(unittest.TestCase):
             {},
             {"family_class": "serif"},
             {},
+            "source-doc-v1",
         )
         right = BUILD_FINAL_PDF.page_render_fingerprint(
             page,
@@ -296,6 +298,46 @@ class StructuredRebuildTests(unittest.TestCase):
             {},
             {"family_class": "serif"},
             {},
+            "source-doc-v1",
+        )
+
+        self.assertNotEqual(left, right)
+
+    def test_page_render_fingerprint_changes_with_source_document_hash(self) -> None:
+        page = {
+            "page_number": 1,
+            "page_type": "digital",
+            "region_source": "native",
+            "strategy_hint": "overlay",
+            "source_fingerprint": "src-1",
+            "asset_ids": [],
+            "tables": [],
+        }
+        block = {
+            "id": "p1-b1",
+            "role": "paragraph",
+            "align": "left",
+            "bbox": [0, 0, 10, 10],
+            "text": "Bonjour",
+            "translated_text": "Hello",
+            "style": {"font_size_hint": 10.0},
+        }
+
+        left = BUILD_FINAL_PDF.page_render_fingerprint(
+            page,
+            [block],
+            {},
+            {"family_class": "serif"},
+            {},
+            "source-doc-v1",
+        )
+        right = BUILD_FINAL_PDF.page_render_fingerprint(
+            page,
+            [block],
+            {},
+            {"family_class": "serif"},
+            {},
+            "source-doc-v2",
         )
 
         self.assertNotEqual(left, right)

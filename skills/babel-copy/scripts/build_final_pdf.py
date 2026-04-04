@@ -583,6 +583,7 @@ def page_render_fingerprint(
     page_assets_for_render: list[dict],
     font_baseline: dict[str, str],
     asset_hash_cache: dict[str, str],
+    source_document_hash: str,
 ) -> str:
     return stable_json_hash(
         {
@@ -590,6 +591,7 @@ def page_render_fingerprint(
             "page_type": str(page.get("page_type", "")),
             "region_source": str(page.get("region_source", "")),
             "strategy_hint": str(page.get("strategy_hint", "")),
+            "source_document_hash": source_document_hash,
             "source_fingerprint": str(page.get("source_fingerprint", "")),
             "font_baseline": font_baseline,
             "blocks": [block_render_fingerprint(block) for block in page_blocks],
@@ -617,6 +619,7 @@ def build_page_contexts(
     assets_by_id: dict[str, dict],
     font_baseline: dict[str, str],
     asset_hash_cache: dict[str, str],
+    source_document_hash: str,
 ) -> list[dict]:
     blocks = blocks_by_page(payload)
     page_contexts: list[dict] = []
@@ -635,6 +638,7 @@ def build_page_contexts(
             page_assets_for_render,
             font_baseline,
             asset_hash_cache,
+            source_document_hash,
         )
         page["render_fingerprint"] = render_fingerprint
         page["render_mode"] = mode
@@ -705,7 +709,13 @@ def render_pages_via_typst(
     return output_pdf
 
 
-def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, profiler=None) -> Path:
+def render_hybrid_document(
+    source_pdf: Path,
+    payload: dict,
+    output_pdf: Path,
+    profiler=None,
+    source_document_hash: str | None = None,
+) -> Path:
     assets_by_id = asset_map(payload)
     cache_dir = output_pdf.parent / ".build-cache"
     with profiler.stage("open_source_pdf", path=source_pdf) if profiler else nullcontext():
@@ -717,7 +727,14 @@ def render_hybrid_document(source_pdf: Path, payload: dict, output_pdf: Path, pr
     font_usability_cache: dict[str, bool] = {}
     asset_hash_cache: dict[str, str] = {}
     font_baseline = core.font_baseline_from_payload(payload)
-    page_contexts = build_page_contexts(payload, assets_by_id, font_baseline, asset_hash_cache)
+    resolved_source_document_hash = source_document_hash or sha256_file(source_pdf)
+    page_contexts = build_page_contexts(
+        payload,
+        assets_by_id,
+        font_baseline,
+        asset_hash_cache,
+        resolved_source_document_hash,
+    )
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="babel-copy-fonts-") as font_dir_raw:
@@ -880,7 +897,13 @@ def main() -> int:
             document_hash = sha256_file(source_pdf)
         profiler.set_counter("page_count", len(payload.get("pages", [])))
         profiler.set_counter("block_count", len(payload.get("blocks", [])))
-        rendered = render_hybrid_document(source_pdf, payload, output_pdf, profiler=profiler)
+        rendered = render_hybrid_document(
+            source_pdf,
+            payload,
+            output_pdf,
+            profiler=profiler,
+            source_document_hash=document_hash,
+        )
         update_run_manifest(
             run_manifest_path,
             {
