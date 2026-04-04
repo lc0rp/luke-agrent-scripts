@@ -347,7 +347,7 @@ def can_reuse_extracted_page(
     if not asset_paths_exist(previous_page_assets):
         return False
     render_path = previous_page.get("render_path")
-    if write_page_renders and render_path and not Path(render_path).exists():
+    if write_page_renders and (not render_path or not Path(render_path).exists()):
         return False
     return True
 
