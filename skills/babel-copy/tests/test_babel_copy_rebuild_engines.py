@@ -61,8 +61,47 @@ def make_build_final_pdf_stubs() -> dict[str, types.ModuleType]:
 
     class DummyRect:
         def __init__(self, *args, **kwargs):
-            self.args = args
-            self.kwargs = kwargs
+            if len(args) == 1:
+                value = args[0]
+                if isinstance(value, DummyRect):
+                    self.x0, self.y0, self.x1, self.y1 = value.x0, value.y0, value.x1, value.y1
+                else:
+                    self.x0, self.y0, self.x1, self.y1 = [float(item) for item in value]
+            else:
+                self.x0, self.y0, self.x1, self.y1 = [float(item) for item in args[:4]]
+
+        @property
+        def width(self):
+            return self.x1 - self.x0
+
+        @property
+        def height(self):
+            return self.y1 - self.y0
+
+        @property
+        def is_empty(self):
+            return self.width <= 0 or self.height <= 0
+
+        def __and__(self, other):
+            return DummyRect(
+                max(self.x0, other.x0),
+                max(self.y0, other.y0),
+                min(self.x1, other.x1),
+                min(self.y1, other.y1),
+            )
+
+        def __or__(self, other):
+            return DummyRect(
+                min(self.x0, other.x0),
+                min(self.y0, other.y0),
+                max(self.x1, other.x1),
+                max(self.y1, other.y1),
+            )
+
+        def get_area(self):
+            if self.is_empty:
+                return 0.0
+            return self.width * self.height
 
     fake_fitz.Rect = DummyRect
     fake_fitz.Document = object
@@ -183,8 +222,20 @@ class StructuredRebuildTests(unittest.TestCase):
 
         filtered = BUILD_FINAL_PDF.filtered_payload_for_pages(
             payload,
-            [2, 3],
-            BUILD_FINAL_PDF.asset_map(payload),
+            [
+                {
+                    "page_number": 2,
+                    "page": payload["pages"][0],
+                    "page_blocks": [payload["blocks"][0]],
+                    "page_assets": [payload["assets"][0]],
+                },
+                {
+                    "page_number": 3,
+                    "page": payload["pages"][1],
+                    "page_blocks": [payload["blocks"][1]],
+                    "page_assets": [payload["assets"][1]],
+                },
+            ],
         )
 
         self.assertEqual(filtered["page_count"], 2)
@@ -248,6 +299,32 @@ class StructuredRebuildTests(unittest.TestCase):
         )
 
         self.assertNotEqual(left, right)
+
+    def test_resolve_overlay_render_rect_reflows_block_downward(self) -> None:
+        rect = BUILD_FINAL_PDF.fitz.Rect(10, 10, 110, 30)
+        occupied = [
+            ("preserved-1", BUILD_FINAL_PDF.fitz.Rect(10, 25, 110, 45), "preserved"),
+        ]
+        page_rect = BUILD_FINAL_PDF.fitz.Rect(0, 0, 200, 200)
+
+        resolved, blocking = BUILD_FINAL_PDF.resolve_overlay_render_rect(rect, occupied, page_rect)
+
+        self.assertIsNone(blocking)
+        self.assertGreaterEqual(resolved.y0, 46.5)
+        self.assertEqual((resolved.x0, resolved.x1), (rect.x0, rect.x1))
+
+    def test_resolve_overlay_render_rect_reports_blocker_when_page_has_no_room(self) -> None:
+        rect = BUILD_FINAL_PDF.fitz.Rect(10, 170, 110, 195)
+        occupied = [
+            ("preserved-1", BUILD_FINAL_PDF.fitz.Rect(10, 185, 110, 198), "preserved"),
+        ]
+        page_rect = BUILD_FINAL_PDF.fitz.Rect(0, 0, 200, 200)
+
+        resolved, blocking = BUILD_FINAL_PDF.resolve_overlay_render_rect(rect, occupied, page_rect)
+
+        self.assertIsNotNone(blocking)
+        self.assertEqual(blocking[0], "preserved-1")
+        self.assertEqual((resolved.x0, resolved.y0, resolved.x1, resolved.y1), (10.0, 170.0, 110.0, 195.0))
 
 
 if __name__ == "__main__":

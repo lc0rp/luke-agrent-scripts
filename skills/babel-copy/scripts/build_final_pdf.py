@@ -28,6 +28,9 @@ from profiling import create_profiler, resolve_profile_path
 import rebuild_typst
 from run_manifest import sha256_file, stable_json_hash, update_run_manifest
 
+OVERLAY_REFLOW_GAP = 1.5
+OVERLAY_REFLOW_PAGE_MARGIN = 6.0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the final babel-copy PDF using the best available page strategy")
@@ -244,6 +247,10 @@ def meaningful_rect_overlap(left_rect: fitz.Rect, right_rect: fitz.Rect) -> fitz
     return intersection
 
 
+def shifted_rect(rect: fitz.Rect, *, dy: float) -> fitz.Rect:
+    return fitz.Rect(rect.x0, rect.y0 + dy, rect.x1, rect.y1 + dy)
+
+
 def overlay_occupancy_rect(block: dict, page_blocks: list[dict], page_rect: fitz.Rect) -> fitz.Rect:
     if block.get("role") == "artifact":
         return fitz.Rect(block["bbox"])
@@ -258,6 +265,35 @@ def should_ignore_artifact_obstacle(block: dict) -> bool:
     height = max(0.0, float(bbox[3]) - float(bbox[1]))
     text = str(block.get("translated_text") or block.get("text") or "").strip()
     return width * height <= 4.0 and len(text) <= 1
+
+
+def resolve_overlay_render_rect(
+    rect: fitz.Rect,
+    occupied_rects: list[tuple[str, fitz.Rect, str]],
+    page_rect: fitz.Rect,
+) -> tuple[fitz.Rect, tuple[str, fitz.Rect, str] | None]:
+    candidate = fitz.Rect(rect)
+    max_bottom = float(page_rect.y1) - OVERLAY_REFLOW_PAGE_MARGIN
+    blocking: tuple[str, fitz.Rect, str] | None = None
+    for _ in range(len(occupied_rects) + 4):
+        blocking = None
+        for obstacle in occupied_rects:
+            _, obstacle_rect, _ = obstacle
+            intersection = meaningful_rect_overlap(candidate, obstacle_rect)
+            if intersection is None:
+                continue
+            if blocking is None or obstacle_rect.y1 > blocking[1].y1:
+                blocking = obstacle
+        if blocking is None:
+            return candidate, None
+        required_shift = float(blocking[1].y1) + OVERLAY_REFLOW_GAP - float(candidate.y0)
+        if required_shift <= 0:
+            break
+        shifted = shifted_rect(candidate, dy=required_shift)
+        if shifted.y1 > max_bottom:
+            return candidate, blocking
+        candidate = shifted
+    return candidate, blocking
 
 
 def filtered_payload_for_pages(payload: dict, page_contexts: list[dict]) -> dict:
@@ -336,14 +372,40 @@ def render_overlay_page(
     source_page = source_doc[page_index]
     preserved_ids = preserved_overlay_ids(page_blocks)
     occupied_rects: list[tuple[str, fitz.Rect, str]] = []
+    planned_render_rects: dict[str, fitz.Rect] = {}
     for block in page_blocks:
         if should_ignore_artifact_obstacle(block):
             continue
         if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
             occupied_rects.append((block["id"], overlay_occupancy_rect(block, page_blocks, out_page.rect), "preserved"))
             continue
+        text = overlay_text_for_block(block, page_blocks)
+        if not str(text).strip():
+            continue
+        rect = render_rect_for_block(block, page_blocks, out_page.rect)
+        rect, blocking = resolve_overlay_render_rect(rect, occupied_rects, out_page.rect)
+        if blocking is not None:
+            obstacle_id, obstacle_rect, obstacle_kind = blocking
+            intersection = meaningful_rect_overlap(rect, obstacle_rect)
+            if intersection is None:
+                intersection = obstacle_rect
+            raise SystemExit(
+                "Overlay collision detected on page "
+                f"{page.get('page_number')} between block {block['id']} and {obstacle_kind} "
+                f"block {obstacle_id}; intersection="
+                f"({intersection.x0:.2f}, {intersection.y0:.2f}, {intersection.x1:.2f}, {intersection.y1:.2f}). "
+                "Use a custom_override or switch this page to rebuild mode."
+            )
+        planned_render_rects[block["id"]] = rect
+        occupied_rects.append((block["id"], rect, "translated"))
+    for block in page_blocks:
+        if block["id"] in preserved_ids or block.get("keep_original") or block.get("role") == "artifact":
+            continue
+        planned_rect = planned_render_rects.get(block["id"])
+        if planned_rect is None:
+            continue
         fill = core.estimate_background_color(source_page, tuple(block["bbox"]), "white")
-        out_page.add_redact_annot(redaction_rect_for_block(block, page_blocks), fill=fill)
+        out_page.add_redact_annot(redaction_rect_for_block(block, page_blocks) | planned_rect, fill=fill)
     if page_blocks:
         out_page.apply_redactions()
     for block in page_blocks:
@@ -352,18 +414,7 @@ def render_overlay_page(
         text = overlay_text_for_block(block, page_blocks)
         if not str(text).strip():
             continue
-        rect = render_rect_for_block(block, page_blocks, out_page.rect)
-        for obstacle_id, obstacle_rect, obstacle_kind in occupied_rects:
-            intersection = meaningful_rect_overlap(rect, obstacle_rect)
-            if intersection is None:
-                continue
-            raise SystemExit(
-                "Overlay collision detected on page "
-                f"{page.get('page_number')} between block {block['id']} and {obstacle_kind} "
-                f"block {obstacle_id}; intersection="
-                f"({intersection.x0:.2f}, {intersection.y0:.2f}, {intersection.x1:.2f}, {intersection.y1:.2f}). "
-                "Use a custom_override or switch this page to rebuild mode."
-            )
+        rect = planned_render_rects.get(block["id"], render_rect_for_block(block, page_blocks, out_page.rect))
         style = block.get("style", {})
         render_font_name, render_font_file = resolve_font_resource(
             source_doc,
@@ -388,9 +439,7 @@ def render_overlay_page(
         if remainder:
             # The core renderer already drew the block once at minimum size. Avoid a second draw pass,
             # which creates partially overlaid duplicate text on dense OCR pages.
-            occupied_rects.append((block["id"], rect, "translated"))
             continue
-        occupied_rects.append((block["id"], rect, "translated"))
     return out_doc
 
 

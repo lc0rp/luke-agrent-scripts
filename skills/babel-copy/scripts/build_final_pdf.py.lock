@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-03-20T18:05:38Z"
+exclude-newer = "2026-03-21T02:37:26Z"
 
 [manifest]
 requirements = [

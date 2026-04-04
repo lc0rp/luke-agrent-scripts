@@ -305,6 +305,13 @@ Preserve:
 - diagrams or arrows that carry meaning
 - headers and footer line art
 - flow-chart connectors, directional arrows, and callout geometry
+- any handwritten marks, initials, annotations, approval scribbles, or equivalent original-document markup
+
+Hard rule:
+
+- never discard signatures, stamps, handwritten marks, or other original-document markup in order to make layout easier
+- if overlay composition collides, resolve it by reflowing translated text, adjusting block placement, or changing page strategy while still preserving that original markup
+- loss of original signatures or markup is a build failure, not an acceptable tradeoff
 
 Fallback only when reconstruction is too risky:
 
