@@ -47,6 +47,8 @@ Treat each source file as an independent job.
 
 This skill is deliberately hybrid. Some parts should be scripted, but this is not a 100% scripted workflow. The operator must inspect preview renders, notice when the chosen strategy is wrong, and switch tactics before committing to the final PDF.
 
+If subagent use is allowed and you expect delegation to help, read [subagents.md](subagents.md) before spawning anything. Keep the critical path in the main rollout and delegate only work packets with explicit file contracts.
+
 The pipeline is:
 
 1. extract text and structure
