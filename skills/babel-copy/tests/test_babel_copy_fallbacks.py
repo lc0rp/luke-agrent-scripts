@@ -571,6 +571,8 @@ class ExtractDocumentTests(unittest.TestCase):
             workspace = Path(tmp_raw)
             asset_path = workspace / "asset.png"
             asset_path.write_bytes(b"png")
+            render_path = workspace / "page-001.png"
+            render_path.write_bytes(b"png")
             previous_page = {
                 "page_number": 1,
                 "source_fingerprint": "fp-1",
@@ -603,6 +605,27 @@ class ExtractDocumentTests(unittest.TestCase):
                     previous_page_assets=[{"path": str(asset_path)}],
                     fragment_merge_review_enabled=True,
                     write_page_renders=False,
+                )
+            )
+
+            self.assertFalse(
+                EXTRACT_DOCUMENT.can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint_matches_previous=True,
+                    previous_page_assets=[{"path": str(asset_path)}],
+                    fragment_merge_review_enabled=False,
+                    write_page_renders=True,
+                )
+            )
+
+            previous_page["render_path"] = str(render_path)
+            self.assertTrue(
+                EXTRACT_DOCUMENT.can_reuse_extracted_page(
+                    previous_page=previous_page,
+                    page_fingerprint_matches_previous=True,
+                    previous_page_assets=[{"path": str(asset_path)}],
+                    fragment_merge_review_enabled=False,
+                    write_page_renders=True,
                 )
             )
 
