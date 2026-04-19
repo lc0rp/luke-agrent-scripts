@@ -1,3 +1,8 @@
 AGENTS.md.bak.20260315T064512
 *.pyc
 .DS_Store
+# Generated skill packaging artifacts
+skills/temp/
+skills/*.zip
+__pycache__/
+*.pyc
