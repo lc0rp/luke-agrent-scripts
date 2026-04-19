@@ -2,7 +2,7 @@
 name: qmd
 description: Local hybrid search for markdown notes and docs. Use when searching notes, finding related content, or retrieving documents from indexed collections.
 homepage: https://github.com/tobi/qmd
-metadata: {"clawdbot":{"emoji":"🔍","os":["darwin","linux"],"requires":{"bins":["qmd"]},"install":[{"id":"bun-qmd","kind":"shell","command":"bun install -g https://github.com/tobi/qmd","bins":["qmd"],"label":"Install qmd via Bun"}]}}
+metadata: {"clawdbot":{"emoji":"🔍","os":["darwin","linux"],"requires":{"bins":["qmd"]},"install":[{"id":"npm-qmd","kind":"shell","command":"npm install -g @tobilu/qmd","bins":["qmd"],"label":"Install qmd via npm"}]}}
 ---
 
 # qmd - Quick Markdown Search
@@ -24,15 +24,23 @@ Local search engine for Markdown notes, docs, and knowledge bases. Index once, s
 
 ## Prerequisites
 
-- Bun >= 1.0.0
+- Node.js >= 22
 - macOS: `brew install sqlite` (SQLite extensions)
-- Ensure PATH includes: `$HOME/.bun/bin`
-
-Install Bun (macOS): `brew install oven-sh/bun/bun`
+- `qmd` must be on PATH
 
 ## Install
 
-`bun install -g https://github.com/tobi/qmd`
+Preferred:
+
+```bash
+npm install -g @tobilu/qmd
+```
+
+macOS note:
+
+- `qmd embed` and vector search depend on `sqlite-vec`.
+- Upstream supports Bun, but on macOS Bun relies on extension-capable SQLite and can still be more fragile than the npm/Node path.
+- If Bun is used and vector features fail, prefer the npm install path before debugging anything else.
 
 ## Setup
 
@@ -109,13 +117,18 @@ Example schedules (cron):
 
 ```bash
 # Hourly incremental updates (keeps BM25 fresh):
-0 * * * * export PATH="$HOME/.bun/bin:$PATH" && qmd update
+0 * * * * qmd update
 
 # Optional: nightly embedding refresh (can be slow):
-0 5 * * * export PATH="$HOME/.bun/bin:$PATH" && qmd embed
+0 5 * * * qmd embed
 ```
 
 If your Clawdbot/agent environment supports a built-in scheduler, you can run the same commands there instead of system cron.
+
+Machine-specific note:
+
+- For a single-machine automation, it is reasonable to use the resolved absolute binary path for extra robustness.
+- Example on Luke's Mac after the npm install: `/opt/homebrew/bin/qmd`.
 
 ## Models and cache
 
