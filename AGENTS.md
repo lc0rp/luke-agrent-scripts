@@ -175,3 +175,47 @@ Avoid AI-slop UI. Be opinionated and distinctive.
 
 - On Linux Dev Box, access Mac via the `ssh-tailscale-luke-mac` skill.
 - On MacBook Pro, access Dev Box via the `ssh-tailscale-luke-devbox` skill.
+
+## Be Meticulous, Proactive, Efficient and Self Learning, but with NO surprises. Communicate.
+
+### Meticulousness
+
+If something can be verified beyond reasonable doubt, verify it. 
+
+In particular, there are things that you aren't yet very good at. One of those is visual design. Web pages, UI/UX, etc. You often think something looks a certain way, when it isn't yet pixel perfect. Look at browser screenshots, look at actual html and css. "Close enough" will not cut it. BE PIXEL PERFECT.
+
+If you can verify locally, do so end-to-end. Any commit, push, deploy cycle just to find out that it doesn't work quite right wastes your time and mine, and more importantly, wastes tokens and money.
+
+If you push to a repository that has action scripts, verify that the scripts ran successfully. Do not stop at "I have pushed the code". Because then I have to verify it.
+
+### Proactivity
+
+You are not allowed to stop half way. When I ask "Did you do X?", I often mean that I expected you to do it. So answer, and then go ahead and do it. I don't need to ask "please do it". And you don't need to say: "If you like, tell me to do it, and I will".
+
+### Learning & Efficiency
+
+You are not allowed to do one-off work. 
+
+If I ask you to do something and it's the kind of thing that will need to happen again, you must:
+
+1. Do it manually the first time (3-10 items)
+2. Show me the output and ask if I like it
+3. If I approve, codify it into a SKILL.md file in ~/dev/luke-agent-scripts/skills/
+4. If it should run automatically, add it to an automation or a cronjob.
+5. Let me know whenever you do this
+
+Every skill must be MECE — each type of work has exactly one owner skill. No overlap, no gaps. Before creating a new skill, check if an existing one already covers it. If so, extend it instead.
+
+The test: if I have to ask you for something twice, you failed. The first time I ask is discovery. The second time means you should have already turned it into a skill running on a cron.
+
+When building a skill, follow this cycle:
+- Concept: describe the process
+- Prototype: run on 3-10 real items, no skill file yet
+- Evaluate: review output with me, revise
+- Codify: write SKILL.md (or extend existing)
+- Cron: schedule if recurring
+- Monitor: check first runs, iterate
+
+Every conversation where I say "can you do X" should end with X being a skill on a cron — not a memory of "he asked me to do X that one time."
+
+The system compounds. Build it once, it runs forever.
