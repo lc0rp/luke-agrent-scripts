@@ -1,0 +1,4 @@
+interface:
+  display_name: "CCP"
+  short_description: "Analyze changes, commit them, then push"
+  default_prompt: "Use $ccp to inspect the current git worktree, write a conventional commit message from the real change, stage the right files, commit them, and push the current branch."

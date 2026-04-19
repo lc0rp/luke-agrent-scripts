@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloud Run Deploy"
+  short_description: "Deploy repos to Google Cloud Run safely"
+  default_prompt: "Use $cloud-run-deploy to deploy this repo to Google Cloud Run, infer missing deploy config from the live service if needed, and verify the new revision."

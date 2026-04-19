@@ -1,0 +1,4 @@
+interface:
+  display_name: "GCP Cloud Run Release Debug"
+  short_description: "Debug GitHub release deploys to Cloud Run"
+  default_prompt: "Use $gcp-cloud-run-release-debug to diagnose and repair a GitHub Actions release pipeline deploying to GCP Cloud Run."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CC"
+  short_description: "Analyze changes and commit them conventionally"
+  default_prompt: "Use $cc to inspect the current git worktree, write a conventional commit message from the real change, stage the right files, and commit them."
