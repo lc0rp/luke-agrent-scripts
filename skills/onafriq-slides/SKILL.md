@@ -9,8 +9,10 @@ Use this skill for any Onafriq slide work.
 
 ## Source files
 
-- Slide template: `references/onafriq-slides-template.pptx`
-- Brand guide: `references/onafriq-brand-guide-v4.pdf`
+- Slide master templates (pptx): `references/onafriq-slides-template.pptx`
+  - Slide master templates (pdf): `references/onafriq-slides-template.pdf` (can use for reference)
+  - Slide master templates (montage): `references/onafriq-slides-template-montage.png` (can use for reference)
+- Brand guide: `references/onafriq-brand-guide-v4-web.pdf`
 - Slide-focused brand summary: `references/onafriq-slide-brand-rules.md`
 
 Read `references/onafriq-slide-brand-rules.md` before making slide changes. Go back to the PDF only if you need deeper brand context.
@@ -23,8 +25,8 @@ Treat the PowerPoint template as the production design system. Build from it, no
 
 Follow this sequence every time:
 
-1. Duplicate `references/onafriq-slides-template.pptx`.
-2. Work only in the duplicated file.
+1. Duplicate the master templates `references/onafriq-slides-template.pptx`.
+2. Work only in the duplicated file. Use only the master templates from this file.
 3. Review the existing slides in that copy and find the slide whose structure best matches the new content.
 4. Duplicate that source slide.
 5. Replace the placeholder or existing content on the duplicated slide.
