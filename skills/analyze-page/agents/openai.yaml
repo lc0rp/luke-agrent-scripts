@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze Page"
+  short_description: "Generate frozen PDF page diagnostics"
+  default_prompt: "Use $analyze_page to inspect existing On.Translate frozen translation artifacts for selected pages, generating labeled PDFs and a short diagnosis."
