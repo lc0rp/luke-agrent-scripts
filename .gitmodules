@@ -7,3 +7,6 @@
 [submodule "skills/dimillian-skills"]
 	path = skills/dimillian-skills
 	url = https://github.com/Dimillian/Skills.git
+[submodule "skills/symphony-linear-starter"]
+	path = skills/symphony-linear-starter
+	url = https://github.com/jvogan/symphony-linear-starter
