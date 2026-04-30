@@ -46,11 +46,27 @@ process action:kill sessionId:XXX
 
 ## Codex CLI
 
-**Model:** `gpt-5.2-codex` default (via `~/.codex/config.toml`)
+**Default model:** use `gpt-5.5` for long-running Codex coding work when available.
+
+Reasoning effort:
+- `medium`: default for long-running coding, tool-heavy debugging, refactors, and tasks with real verification.
+- `low`: simple edits, known command sequences, monitoring, or follow-up checks.
+- `high` or `xhigh`: hard asynchronous work where a measurable quality gain is worth the extra time and tokens.
+
+Before launching a long-running agent, write a compact outcome packet:
+- goal
+- target repo or workdir
+- owned paths or explicit read-only scope
+- success criteria
+- constraints and allowed side effects
+- required validation commands
+- stopping condition and handoff format
+
+Avoid long process scripts in the prompt unless the exact path matters. Give the agent the outcome, evidence rules, and validation bar, then let it choose the route.
 
 ### Building/Creating (use --full-auto or --yolo)
 ```bash
-bash workdir:~/project background:true command:"codex exec --full-auto \"Build a snake game...\""
+bash workdir:~/project background:true command:"codex exec --model gpt-5.5 --full-auto \"Build a snake game. Success criteria: playable in browser, keyboard controls, score display, no console errors, and local run instructions.\""
 ```
 
 ---
@@ -61,6 +77,12 @@ bash workdir:~/project background:true command:"codex exec --full-auto \"Build a
 2. Use **background** for long tasks; check logs via `process`.
 3. Use **tmux** for interactive sessions; avoid half-attached CLI runs.
 4. If a repo is sensitive/live, use a temp clone or worktree.
+5. Preserve existing user changes; do not ask the background agent to reset, clean, stage, commit, or push unless that is the requested task.
+6. Keep the prompt explicit about when to continue autonomously and when to stop for missing credentials, destructive actions, or unclear product decisions.
+
+## Completion Gate
+
+A long-running agent is not done because the process exited. Before handoff, inspect the final log, check the changed files or produced artifacts, run the required validation when feasible, and report any failed or skipped checks with exact errors.
 
 ---
 

@@ -1,15 +1,37 @@
 ---
 name: skill-harvester
-description: Review the current Codex session for repeated workflows, missing guardrails, or stale skill coverage; recommend whether to create a new skill or update an existing one; then use the skill-creator workflow to implement and validate the chosen skill work. Use when the user asks to harvest reusable skills from the current session, wants recommendations grounded in the live thread, or wants Codex to turn session learnings into new or updated skills.
+description: Review the current Codex session for repeated workflows, missing guardrails, or stale skill coverage; recommend whether to create a new skill or update an existing one; then use the GPT-5.5-oriented skill-creator workflow to implement and validate the chosen skill work. Use when the user asks to harvest reusable skills from the current session, wants recommendations grounded in the live thread, or wants Codex to turn session learnings into new or updated skills.
 ---
 
 # Skill Harvester
 
 Harvest reusable skill work from the active session. Start from the current thread, compare the observed workflow against existing skills, show a compact audit, then use `skill-creator` to implement and validate the highest-value recommendation.
 
+## GPT-5.5 Operating Mode
+
+Use outcome-first harvesting. The output is a decision, not a brainstorm: update an existing skill, create a new skill, or do nothing.
+
+Reasoning effort:
+
+- `medium`: default for session review, skill coverage comparison, and implementation handoff.
+- `low`: simple follow-up audits with obvious ownership.
+- `high`: overlapping skills, ambiguous ownership, or conflicting session evidence.
+
+For every recommendation, state:
+
+- observed session evidence
+- target skill owner
+- trigger surface
+- missing behavior or stale guidance
+- smallest valuable change
+- validation method
+- stopping condition
+
+Use subagents only when the session evidence is broad enough that parallel review materially improves coverage.
+
 ## Default Target
 
-- Default skill root: `/Users/luke/Documents/dev/luke-agent-scripts/skills`
+- Default skill root: `/Users/luke/dev/luke-agent-scripts/skills`
 - If the user names a different destination, use that instead.
 - Treat the target root as the primary coverage surface.
 - Check global skills only after scanning the target root, to avoid proposing duplicates that are already solved locally.
@@ -95,6 +117,7 @@ For each recommendation, include:
 - why it is needed
 - what should trigger it
 - the smallest valuable scope
+- how success will be verified
 
 If the user asked only for recommendations, stop after the audit.
 
@@ -104,7 +127,7 @@ Default to implementing one recommendation at a time. Only batch multiple skills
 
 ### 5. Hand Off Implementation to Skill Creator
 
-Use [`$skill-creator`](/Users/luke/.codex/skills/.system/skill-creator/SKILL.md) for the actual create or update work.
+Use the local [`create-skill`](/Users/luke/dev/luke-agent-scripts/skills/create-skill/SKILL.md) workflow when the user wants Luke's eval harness. Use the official [`$skill-creator`](/Users/luke/.codex/skills/.system/skill-creator/SKILL.md) when the task is plain skill scaffolding or generic skill mechanics.
 
 For a new skill:
 
@@ -133,7 +156,7 @@ After each create or update:
 
 - run `quick_validate.py` on the skill folder
 - fix any reported issues and re-run validation
-- forward-test non-trivial skills with a fresh subagent when practical
+- forward-test non-trivial skills with a fresh subagent when practical, using the same target model and effort as the intended runtime
 
 Use:
 
@@ -141,7 +164,7 @@ Use:
 python3 /Users/luke/.codex/skills/.system/skill-creator/scripts/quick_validate.py <path/to/skill-folder>
 ```
 
-Forward-test with a user-like prompt that uses the skill directly. Do not frame the task as a skill review. Ask before forward-testing only if the evaluation is likely to be slow, risky, approval-heavy, or live-system affecting.
+Forward-test with a user-like prompt that uses the skill directly. Do not frame the task as a skill review. Ask before forward-testing only if the evaluation is likely to be slow, risky, approval-heavy, or live-system affecting. For GPT-5.5, start at `medium` effort for non-trivial forward tests and reduce to `low` only when the workflow is deterministic.
 
 ### 7. Close With Outcome And Next Recommendations
 
@@ -162,3 +185,4 @@ Report:
 - Do not leave templated TODO text in the final skill.
 - Do not add extra documentation files unless the skill truly needs bundled references, scripts, or assets.
 - Do not skip validation after editing a skill.
+- Do not carry over long process instructions from the session when a shorter outcome-first rule captures the durable behavior.

@@ -32,15 +32,20 @@ Out of scope:
 - print or slide design
 - logo or full brand identity creation unless it directly supports a web UI task
 
-## GPT-5.4 Quickstart
+## GPT-5.5 Operating Mode
 
-When model settings are available, start at low reasoning for straightforward web work. Use medium only when the design or implementation is materially more complex.
+When model settings are available, start at `low` reasoning for straightforward UI work. Use `medium` when the task needs multi-step codebase navigation, browser verification, or several interacting states. Use `high` only for broad redesigns, unclear product constraints, or failures that need deeper investigation.
 
-Before coding:
-1. Define the design system and constraints up front.
-2. Gather visual guardrails: screenshot, mood board, or generated visual options.
-3. Define a narrative or content strategy.
-4. Use real product context and real copy whenever possible.
+Use GPT-5.5 as an outcome-first design partner. State the destination and constraints, then let the model choose the efficient path unless the product or codebase requires a specific sequence.
+
+Before coding, define:
+1. Target outcome: what screen, page, flow, or component should exist.
+2. Success criteria: what must be true in the rendered UI before handoff.
+3. Constraints: stack, brand, content, accessibility, performance, and viewport requirements.
+4. Visual evidence: screenshots, references, mood board, generated options, or a brief visual thesis.
+5. Content source: real product context and real copy whenever possible.
+
+Stop when the requested surface is implemented, visually verified after the final code change, and the final handoff can name the screens and viewports checked.
 
 ## Design Dials
 
@@ -57,7 +62,7 @@ Raise these only with intent. More is not better.
 
 ## Working Model
 
-Before building, write three things:
+Before building substantial UI, write three things:
 - visual thesis: one sentence describing mood, material, energy, and level of restraint
 - content plan: the section sequence or screen narrative
 - interaction thesis: 2 or 3 motion ideas that change the feel of the work
@@ -149,7 +154,7 @@ Implementation guardrails:
 
 ### 6. Verify visually
 
-Use Playwright or equivalent browser inspection when visual QA matters and tools are available.
+Use Playwright, the in-app browser, or equivalent browser inspection when visual QA matters and tools are available. Relaunch the real surface after the final code change before calling the work complete.
 
 Check:
 - multiple viewports
@@ -159,6 +164,7 @@ Check:
 - overlap from fixed or floating elements
 - optical alignment of icons, buttons, and mixed text blocks
 - whether all requested deliverables are actually finished
+- whether text, fixed elements, and interactive chrome overlap at any target breakpoint
 
 Use [references/review-checklist.md](references/review-checklist.md).
 
@@ -297,6 +303,7 @@ For substantial UI work, leave behind:
 - realistic states
 - responsive behavior
 - accessibility-conscious interactions
-- a brief note on what changed and why
+- the rendered screens and viewports visually verified after the final code change
+- whether the result matched the latest user reference, when a reference exists
 
 Aim for deliberate, product-appropriate, non-generic UI that could survive real scrutiny.

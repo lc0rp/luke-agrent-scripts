@@ -7,8 +7,8 @@ metadata:
     type: Reference
     primary_audience: Documentation owners and contributors
     owner: Documentation program
-    last_verified: 2026-03-22
-    next_review_by: 2026-06-22
+    last_verified: 2026-04-30
+    next_review_by: 2026-07-30
     source_of_truth: ./references/documentation_playbook.md
 ---
 
@@ -16,7 +16,7 @@ metadata:
 
 ## Purpose
 
-This document describes a repeatable process for documenting a software project for four primary audiences:
+This skill helps document a software project for four primary audiences:
 
 - Builders (product and engineering)
 - Testers (QA engineers and test automation engineers)
@@ -25,7 +25,29 @@ This document describes a repeatable process for documenting a software project 
 
 The goal is to help a reader find the right page for their goal, at the right time, without guessing.
 
-This approach is project-agnostic. You can apply it to Proteus or any other project.
+This approach is project-agnostic.
+
+## GPT-5.5 Operating Mode
+
+Use outcome-first documentation work. Define the audience, reader job, content type, source of truth, validation method, and review owner before writing large amounts of prose.
+
+Reasoning effort:
+
+- `medium`: default for reorganizing docs, designing IA, and writing audience-specific pages.
+- `low`: metadata edits, small page updates, link fixes, or checklist application.
+- `high`: conflicting source material, unclear audience ownership, or high-risk docs such as security, data handling, legal, or release procedures.
+
+For each docs task, state or infer:
+
+- target audience
+- reader job
+- content type: Tutorial, How-to, Reference, or Concept
+- source of truth
+- success criteria
+- validation or review step
+- stopping condition
+
+Keep generated docs concise and direct. Add process detail only when the reader must follow the exact steps safely.
 
 # User Docs (user-docs) vs Dev Docs (dev-docs)
 
@@ -100,7 +122,7 @@ Every page must include this metadata (frontmatter is preferred):
 - `next_review_by`: date
 - `source_of_truth`: link to the authoritative source (PRD, code, API spec, ticket, policy, runbook)
 
-## The workflow (step by step)
+## Workflow
 
 ### Step 1: Write down the scope and the product boundary
 
@@ -250,6 +272,18 @@ Output:
 
 - A small set of pages that covers the top jobs per audience.
 
+Before writing a page, use this compact page contract:
+
+- Audience:
+- Reader job:
+- Content type:
+- Source of truth:
+- Required metadata:
+- Validation step:
+- Owner and review cadence:
+
+If the page contract is unclear, write the contract first and ask only for missing decisions that could change the page.
+
 ### Step 5.1: Keep language safe for ESL readers
 
 Use these rules:
@@ -299,6 +333,17 @@ Use this rubric:
 Output:
 
 - A short checklist in PR review, or a docs CI check.
+
+## Completion Gate
+
+Before handoff:
+
+- Every edited page has one primary audience and one content type.
+- Metadata is present or the reason it is missing is stated.
+- Claims that can drift link to code, config, policy, ticket, or another source of truth.
+- Tutorials and how-tos include validation or recovery steps where failure is plausible.
+- Start pages route readers instead of duplicating content.
+- The final response names what changed, what was verified, and what still needs owner review.
 
 ## How to apply this to any project
 
