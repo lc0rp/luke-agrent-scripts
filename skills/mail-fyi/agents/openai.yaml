@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mail FYI"
+  short_description: "Surface urgent and important FYI mail"
+  default_prompt: "Use $mail-fyi to fetch unarchived Outlook and Gmail messages I might want to know about."
+
+policy:
+  allow_implicit_invocation: true
