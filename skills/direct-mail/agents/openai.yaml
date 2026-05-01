@@ -1,7 +1,7 @@
 interface:
   display_name: "Mail For Me"
   short_description: "Triage mail meant for Luke"
-  default_prompt: "Use $mail-for-me to fetch actionable Outlook and Gmail messages meant for me."
+  default_prompt: "Use $direct-mail to fetch actionable Outlook and Gmail messages meant for me."
 
 policy:
   allow_implicit_invocation: true

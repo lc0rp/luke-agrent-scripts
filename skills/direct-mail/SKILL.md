@@ -1,9 +1,9 @@
 ---
-name: mail-for-me
-description: Fetch and triage unarchived Outlook and Gmail messages meant for Luke, including direct To/name mentions and only utmost-importance CCs, with spam/automation filtering, since-last-pull state, and Office 365/Gmail links.
+name: direct-mail
+description: Fetch and triage unarchived Outlook and Gmail messages addressed directly to Luke, or mentioning Luke explicitly, including direct To/name mentions and only utmost-importance CCs, with spam/automation filtering, since-last-pull state, and Office 365/Gmail links.
 ---
 
-# Mail For Me
+# Direct Mail
 
 Use this skill when asked to fetch, pull, check, monitor, summarize, or triage mail that is specifically for Luke across Outlook and Gmail.
 
@@ -57,7 +57,7 @@ Use `America/New_York` local time unless the user specifies another timezone.
 - If no date is given and a pull-state file is available, search only messages received after `last_pull_utc`.
 - If no date is given and no state exists, search the current local day from `00:00`.
 
-Default state file in the active workspace: `mail-pull-state.json`.
+Default state file in the active workspace: `direct-mail-pull-state.json`.
 
 After a successful pull, update:
 
@@ -73,7 +73,7 @@ When Luke says a sender, subject, topic, or email is not relevant, add a durable
 
 Use the Gmail connector for Gmail and Microsoft Outlook Email connector for Outlook. Prefer connector-native links in the final output.
 
-1. Read `mail-pull-state.json` if present.
+1. Read `direct-mail-pull-state.json` if present.
 2. Build the received window.
 3. Search direct recipients for Luke's addresses.
 4. Search mention forms in subject/body.
