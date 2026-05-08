@@ -1,6 +1,6 @@
 interface:
-  display_name: "Mail For Me"
-  short_description: "Compatibility wrapper for direct interactions"
+  display_name: "Direct Interactions"
+  short_description: "Triage high-signal interactions meant for Luke"
   default_prompt: "Use $direct-interactions to fetch actionable mail, Slack, and Granola interactions meant for me."
 
 policy:

@@ -1,11 +1,15 @@
 ---
 name: direct-mail
-description: Fetch and triage unarchived Outlook and Gmail messages addressed directly to Luke, or mentioning Luke explicitly, including direct To/name mentions and only utmost-importance CCs, with spam/automation filtering, since-last-pull state, and Office 365/Gmail links.
+description: Compatibility wrapper for direct mail monitoring. The canonical direct monitoring definition now lives in the direct-interactions skill.
 ---
 
 # Direct Mail
 
-Use this skill when asked to fetch, pull, check, monitor, summarize, or triage mail that is specifically for Luke across Outlook and Gmail.
+This skill is a compatibility wrapper. For new work, use `direct-interactions`.
+
+When the user specifically asks for mail only, use the Gmail and Outlook source workflow in:
+
+`/Users/luke/dev/luke-agent-scripts/skills/direct-interactions/SKILL.md`
 
 ## Identity
 
@@ -54,17 +58,19 @@ CC handling:
 Use `America/New_York` local time unless the user specifies another timezone.
 
 - If the user gives a date or date range, use that exact local date window.
-- If no date is given and a pull-state file is available, search only messages received after `last_pull_utc`.
+- If no date is given and a pull-state file is available, search Gmail and Outlook messages received after the relevant source cursor.
 - If no date is given and no state exists, search the current local day from `00:00`.
 
-Default state file in the active workspace: `direct-mail-pull-state.json`.
+Default canonical state file:
+
+`/Users/luke/work/direct-interactions/direct-interactions-state.json`
 
 After a successful pull, update:
 
-- `last_pull_utc`
-- `last_pull_local`
-- `timezone`
-- `default_scope`
+- `sources.gmail.last_pull_utc`
+- `sources.gmail.last_pull_local`
+- `sources.outlook.last_pull_utc`
+- `sources.outlook.last_pull_local`
 - `omit_rules`
 
 When Luke says a sender, subject, topic, or email is not relevant, add a durable omit rule to the state file and use it in future pulls.
@@ -73,8 +79,8 @@ When Luke says a sender, subject, topic, or email is not relevant, add a durable
 
 Use the Gmail connector for Gmail and Microsoft Outlook Email connector for Outlook. Prefer connector-native links in the final output.
 
-1. Read `direct-mail-pull-state.json` if present.
-2. Build the received window.
+1. Read `/Users/luke/work/direct-interactions/direct-interactions-state.json` if present.
+2. Build each source's received window from `sources.gmail.last_pull_utc` and `sources.outlook.last_pull_utc`.
 3. Search direct recipients for Luke's addresses.
 4. Search mention forms in subject/body.
 5. Separately search CC matches, then keep only utmost-importance items.
