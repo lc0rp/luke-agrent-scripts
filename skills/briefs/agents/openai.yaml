@@ -1,0 +1,4 @@
+interface:
+  display_name: "Briefs"
+  short_description: "List latest CEO brief links"
+  default_prompt: "Use $briefs to list the latest generated CEO briefs as clickable local links."
