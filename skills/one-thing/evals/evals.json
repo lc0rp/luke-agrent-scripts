@@ -1,0 +1,23 @@
+{
+  "skill_name": "one-thing",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "What's the one thing I should do right now to move the needle for Onafriq?",
+      "expected_output": "A single specific action for Luke as Group CPIO, with evidence from role context, recent Obsidian/brief signals, current communications where available, timing, and a ready-to-send draft.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Cut through the noise across Slack, mail, Granola, my Obsidian projects and the latest weekly briefs. What's the one big hairy audacious action for today?",
+      "expected_output": "Exactly one bold but executable intervention, not a menu, scored implicitly against company impact, role leverage, timing, neglectedness, execution clarity, and evidence strength.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "It's Friday afternoon and I have 45 minutes. What intervention gives the biggest bang for the buck for Onafriq before the weekend?",
+      "expected_output": "A time-aware Friday afternoon recommendation with a concrete first move, named target/channel, concise rationale, draft message or artifact outline, and source gaps if connectors are unavailable.",
+      "files": []
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "One Thing"
+  short_description: "Pick Luke's highest-leverage Onafriq action"
+  default_prompt: "Use $one-thing to find the single highest-leverage action I should take right now for Onafriq, using current company, role, Slack, mail, Granola, Obsidian, OKR, weekly brief, and web signals."
