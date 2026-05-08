@@ -1,0 +1,23 @@
+{
+  "skill_name": "granola-call-logs",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Find Granola call logs for 2026-05-08 about Arf and summarize decisions, owners, and next steps.",
+      "expected_output": "Searches only the 2026-05-08 daily note folder, reads the Arf summary and transcript pair, and returns action-oriented output with local source paths.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Use Granola logs since 2026-05-01 to sharpen a stablecoin brief. Focus on Bitgo, Arf, USDC, liquidity, actions, and open questions.",
+      "expected_output": "Searches daily Granola notes on or after 2026-05-01, filters by stablecoin/liquidity-related terms and counterparties, reads summaries and transcripts, and prioritizes decisions/actions/open questions over general discussion.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "What did Rajat commit to in Granola meeting notes after 2026-05-05?",
+      "expected_output": "Searches summary and transcript content in daily notes after 2026-05-05 for Rajat, identifies explicit commitments and owners, and cites Granola source paths.",
+      "files": []
+    }
+  ]
+}
