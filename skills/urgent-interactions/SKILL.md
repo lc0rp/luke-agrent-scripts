@@ -1,3 +1,8 @@
+---
+name: urgent-interactions
+description: Fetch and triage high-signal interactions Luke should know about across Gmail, Outlook, Slack, and Granola call logs, including urgent automated mail, mailing-list items, DMs, mentions, threads, meeting action items, security notices, deadlines, payments, family logistics, Lydia messages, and since-last-pull state.
+---
+
 # urgent-interactions
 
 Use this skill to find unread, unarchived, high-signal interactions Luke should know about now across mail, Slack, and meeting context.
