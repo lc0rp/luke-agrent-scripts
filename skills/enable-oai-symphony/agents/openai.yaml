@@ -1,0 +1,4 @@
+interface:
+  display_name: "Enable OAI Symphony"
+  short_description: "Bootstrap a repo for OpenAI Symphony"
+  default_prompt: "Use $enable-oai-symphony to enable OpenAI Symphony in this repository."
