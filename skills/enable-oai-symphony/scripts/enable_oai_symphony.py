@@ -87,6 +87,45 @@ export SYMPHONY_CODEX_HOME="$symphony_codex_home"
 exec symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails "$workflow"
 '''
 
+PR_HANDOFF_SECTION = r'''
+
+## GitHub handoff requirements
+
+Treat commit, push, and pull request creation as part of completing the issue. Do not claim the issue is ready for review unless reviewers can reach the work from Linear.
+
+1. Before editing, sync from `origin/main` and create a dedicated branch for this issue.
+   - Suggested branch shape: `symphony/{{ issue.identifier }}-short-title`.
+   - Keep the branch based on `origin/main`.
+2. Implement the change, then run the validation commands required by the issue and the repository guidance.
+3. Commit the completed work with a focused commit message.
+   - Include `{{ issue.identifier }}` in the commit subject or body.
+   - Do not commit secrets, generated scratch files, or raw customer payloads.
+4. Pull or merge latest `origin/main` into the branch, resolve conflicts if any, and rerun required validation.
+5. Push the branch to the remote.
+6. Create or update a GitHub PR for the branch.
+   - Title format: `[{{ issue.identifier }}] {{ issue.title }}`.
+   - PR body must include: Linear issue link, summary, validation run and result, and any known risk or blocker.
+   - If a PR already exists for the issue, update the existing PR rather than creating a duplicate.
+7. Link the PR in Linear.
+   - Prefer a Linear attachment or related link if available.
+   - If tooling only supports comments, include the PR URL in the final Linear status comment.
+8. Before moving the issue to `In Review`, inspect PR feedback if a PR already exists.
+   - Check top-level PR comments, inline review comments, and review summaries.
+   - Address each actionable comment with code/tests/docs or a concise justified reply.
+   - Push updates and rerun validation after feedback-driven changes.
+9. If GitHub auth or push/PR creation is blocked, do not move the issue to `In Review`.
+   - Leave a Linear comment with the exact failing command, the redacted error, and the required unblock action.
+   - Move the issue back to `Todo` unless a dedicated blocked state exists.
+
+## Review loop behavior
+
+Symphony only dispatches issues in the workflow `active_states`. With the conservative first-run default, those are `Todo` and `In Progress`.
+
+- Reviewer comments added while the issue is in a non-active review state are for the orchestrator/human review pass; they do not automatically wake a worker.
+- To send work back to Symphony, move the Linear issue back to `Todo` or `In Progress` after adding the requested changes as Linear comments or PR comments.
+- When a worker receives an issue with an existing PR, it must start with the PR feedback sweep above, update the same branch/PR, rerun validation, and return the issue to the review state.
+'''
+
 
 def run(cmd: list[str], cwd: Path) -> str:
     result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)
@@ -206,6 +245,18 @@ def run_starter_bootstrap(args: argparse.Namespace, repo: Path, workflow_name: s
     run(cmd, repo)
 
 
+def append_pr_handoff_requirements(repo: Path, workflow_name: str) -> None:
+    path = repo / ".orchestration" / f"{workflow_name}.WORKFLOW.md"
+    if not path.exists():
+        return
+
+    text = path.read_text()
+    if "## GitHub handoff requirements" in text:
+        return
+
+    path.write_text(text.rstrip() + PR_HANDOFF_SECTION + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Enable OpenAI Symphony + Linear in a target repo.")
     parser.add_argument("--target-repo", default=".", help="Target repository path. Defaults to cwd.")
@@ -225,6 +276,7 @@ def main() -> int:
 
     workflow_name = args.workflow_name or f"{repo.name}-{args.lane}"
     run_starter_bootstrap(args, repo, workflow_name)
+    append_pr_handoff_requirements(repo, workflow_name)
     append_env_example(repo)
     write_start_script(repo, workflow_name)
     update_package_json(repo)

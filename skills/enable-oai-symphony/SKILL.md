@@ -41,6 +41,7 @@ The helper script:
 - Adds `LINEAR_API_KEY`, `SYMPHONY_WORKSPACES_ROOT`, and `SYMPHONY_CODEX_HOME` to `.env.example` if missing.
 - Writes `scripts/start_symphony.sh`; it loads only the Symphony/Linear keys from `.env`, never the whole app environment.
 - Adds `symphony:start` to `package.json` when the repo has one.
+- Appends GitHub handoff requirements to the generated workflow so agents commit, push, create or update a PR, and link that PR back to Linear before moving work to review.
 - Keeps the default first run conservative: lane `medium`, label `sym:medium`, and `max_concurrent_agents: 1`.
 
 ## Guardrails
@@ -48,6 +49,7 @@ The helper script:
 - Do not paste real Linear API keys, tokens, app secrets, customer payloads, or raw production data into generated files.
 - Do not source the full `.env` into Symphony workers. Load only `LINEAR_API_KEY`, `SYMPHONY_WORKSPACES_ROOT`, and `SYMPHONY_CODEX_HOME`.
 - Do not start a real Symphony run until Linear has a bounded issue with the workflow label and the operator has approved externally visible Linear changes.
+- Treat a Linear "done" comment without a branch/PR link as incomplete handoff; adjust the workflow before dispatching real implementation work.
 - If the project slug ID is unknown, query Linear read-only or ask for it. Do not guess from the display URL.
 
 ## References
